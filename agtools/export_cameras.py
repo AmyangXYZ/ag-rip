@@ -29,8 +29,9 @@ Output, AG_fbx_anim/<cid>/cameras/<skin>@<sequence>.*:
                    Dutch; the character clip schedule; camera-cut blends; props
   .camera.fbx      that camera in the character FBX space (mapping fitted on the rig's
                    rest pose)
-  .character.fbx   the character with the schedule baked into one action (NLA), so it
-                   plays in step with the camera
+  .character.fbx   the character playing the schedule as one clip: the excerpts are
+                   merged into a Unity clip and exported by export_anim_fbx itself, so it
+                   matches the per-clip exports (rest key, facing; frame 0 = timeline 0)
   _preview/        Workbench frames through the camera (checking)
 Run with system Python; the FBX step re-launches itself inside Blender.
 """
@@ -383,7 +384,7 @@ def sequence(proj: Project, prefab: str) -> dict | None:
             if name and name.lower().startswith(("facialani", "recorded")):
                 continue
             schedule.append({"clip": name, "start": round(c["start"], 5), "duration": round(c["duration"], 5),
-                             "clip_in": round(c["clip_in"], 5), "time_scale": c["time_scale"]})
+                             "clip_in": round(c["clip_in"], 5), "time_scale": c["time_scale"], "anim": anim})
     schedule.sort(key=lambda s: s["start"])
     cuts = []
     for t in tracks:
@@ -405,42 +406,128 @@ def sequence(proj: Project, prefab: str) -> dict | None:
             "frames": frames}
 
 
-# ------------------------------------------------------------------ character FBX lookup
-def clip_fbx(cid: str, skin: str, clip: str | None, kind: str) -> str | None:
-    folder = os.path.join(ANIM_OUT, cid)
-    pats = [f"{skin}@dlc_{clip}.fbx", f"{skin}@dlc_{clip}_*.fbx", f"{skin}@*{clip}.fbx"] if clip else []
-    if kind == "win":
-        pats += [f"{skin}@bat_win.fbx", f"{cid}@bat_win.fbx", f"{cid}@bat_win_0.fbx"]
-    for pat in pats:
-        hits = sorted(h for h in glob.glob(os.path.join(folder, pat)) if "vice" not in os.path.basename(h))
-        if hits:
-            return hits[0]
+
+
+# ------------------------------------------------------------------ character: merged clip
+def clip_set_job(cid: str, skin: str, kind: str) -> dict | None:
+    """The export_anim_fbx job (rig FBX, prefab, stem) of the clip set the sequence's
+    clips come from - so the character FBX is built exactly like the per-clip exports
+    (same rest key, frame range, basis fit, root fold, FBX settings)."""
+    sys.path.insert(0, HERE)
+    import export_anim_fbx
+    jobs = [j for j in export_anim_fbx.plan(cid, None, None) if j["model"] and j["prefab"]]
+    want = [f"{skin}dlc"] if kind == "dlc" else [f"{skin}bat", f"{cid}00bat"]
+    for w in want:
+        for j in jobs:
+            if os.path.basename(j["dir"]).lower() == w:
+                return j
     return None
 
 
-def rig_prefab(skin: str, cid: str, ui: bool) -> str | None:
-    base = os.path.join(SAMPLE, cid, "ExportedProject", "Assets")
-    stems = ([f"{skin}ui_tpose", f"{cid}ui_tpose"] if ui else []) + [f"{skin}_tpose", f"{cid}_tpose", f"{skin}ui_tpose"]
-    for stem in stems:
-        hits = glob.glob(os.path.join(base, "**", f"{stem}.prefab"), recursive=True)
-        if hits:
-            return hits[0]
-    return None
+def win_source(job: dict) -> str | None:
+    wins = sorted(c for c in job["clips"] if c.lower().startswith("win"))
+    return os.path.join(job["dir"], wins[0]) if wins else None
 
 
-def blender(job: dict) -> None:
+def write_merged_clip(path: str, name: str, schedule: list[dict], duration: float) -> None:
+    """Sample the schedule (clip excerpts at timeline offsets) into one Unity clip, one
+    key per frame; parse_anim / export_anim_fbx read it like any ripped clip. Timeline
+    semantics: outside every clip the nearest clip holds its edge pose."""
+    sys.path.insert(0, HERE)
+    from unity_yaml import evaluate, parse_anim
+    clips = {s["anim"]: parse_anim(s["anim"]) for s in schedule}
+    groups = ("rotation", "position", "scale", "euler")
+    paths = {g: sorted(set().union(*(getattr(c, g).keys() for c in clips.values()))) for g in groups}
+    n = int(round(duration * FPS)) + 1
+
+    def pick(t):
+        for s in schedule:
+            if s["start"] - 1e-6 <= t < s["start"] + s["duration"] - 1e-6:
+                return s, s["clip_in"] + (t - s["start"]) * s["time_scale"]
+        before = [s for s in schedule if s["start"] <= t]
+        s = before[-1] if before else schedule[0]
+        return s, s["clip_in"] + (s["duration"] * s["time_scale"] if before else 0.0)
+
+    keys = {g: {p: [] for p in paths[g]} for g in groups}
+    for i in range(n):
+        t = i / FPS
+        s, lt = pick(t)
+        c = clips[s["anim"]]
+        lt = min(max(lt, 0.0), c.stop_time)
+        for g in groups:
+            ncomp = 4 if g == "rotation" else 3
+            for p in paths[g]:
+                src, lt2 = getattr(c, g).get(p), lt
+                if src is None:                 # path missing in this clip: any clip that has it
+                    other = next(cc for cc in clips.values() if p in getattr(cc, g))
+                    src, lt2 = getattr(other, g)[p], min(lt, other.stop_time)
+                keys[g][p].append((t, evaluate(src, lt2, ncomp)))
+
+    section = {"rotation": "m_RotationCurves", "position": "m_PositionCurves",
+               "scale": "m_ScaleCurves", "euler": "m_EulerCurves"}
+
+    def vec(v):
+        return "{" + ", ".join(f"{a}: {x:.9g}" for a, x in zip("xyzw", v)) + "}"
+
+    out = ["%YAML 1.1", "%TAG !u! tag:unity3d.com,2011:", "--- !u!74 &7400000", "AnimationClip:",
+           f"  m_Name: {name}"]
+    for g in ("rotation", "euler", "position", "scale"):
+        if not paths[g]:
+            out.append(f"  {section[g]}: []")
+            continue
+        out.append(f"  {section[g]}:")
+        zero = vec((0.0,) * (4 if g == "rotation" else 3))
+        for p in paths[g]:
+            out += ["  - curve:", "      serializedVersion: 2", "      m_Curve:"]
+            for t, v in keys[g][p]:
+                out += ["      - serializedVersion: 3", f"        time: {t:.9g}", f"        value: {vec(v)}",
+                        f"        inSlope: {zero}", f"        outSlope: {zero}"]
+            out += ["      m_PreInfinity: 2", "      m_PostInfinity: 2", f"    path: {p}"]
+    out += ["  m_FloatCurves: []", f"  m_SampleRate: {FPS}", "  m_AnimationClipSettings:",
+            "    m_StartTime: 0", f"    m_StopTime: {duration:.9g}", "    m_LoopTime: 0"]
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(out) + "\n")
+
+
+def export_characters(cid: str, job: dict, merged_dir: str, names: list[str], out_dir: str) -> None:
+    """Run the character exporter on the merged clips, then move them beside the cameras."""
+    sys.path.insert(0, HERE)
+    import export_anim_fbx
+    tmp_out = os.path.join(CACHE, "_char_out")
+    shutil.rmtree(tmp_out, ignore_errors=True)
+    j = dict(job, dir=merged_dir, clips=[f"{n}.anim" for n in names], prefix="")
+    payload = os.path.join(CACHE, "_char_job.json")
+    json.dump({"cid": cid, "out": tmp_out, "dry_run": False, "no_fold_root": False,
+               "script_dir": HERE, "jobs": [j]}, open(payload, "w"))
+    r = subprocess.run([export_anim_fbx.find_blender(), "-b", "-noaudio", "-P",
+                        os.path.abspath(export_anim_fbx.__file__), "--", payload],
+                       capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        if re.match(r"\s+\[\d+/\d+\]", line) or "basis fit" in line:
+            print("   ", line.strip())
+    produced = glob.glob(os.path.join(tmp_out, cid, "*.fbx"))
+    for n in names:
+        tag = re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9._-]", "_", n)).strip("_")
+        src = next((p for p in produced if os.path.basename(p).endswith(f"@{tag}.fbx")), None)
+        if src:
+            shutil.move(src, os.path.join(out_dir, f"{n}.character.fbx"))
+        else:
+            print(f"    ! character export missing for {n}")
+
+
+# ------------------------------------------------------------------ camera FBX (Blender)
+def blender(payload: dict) -> None:
     sys.path.insert(0, HERE)
     from export_anim_fbx import find_blender
-    payload = os.path.join(CACHE, "_job.json")
-    json.dump(job, open(payload, "w"))
-    r = subprocess.run([find_blender(), "-b", "--factory-startup", "--python", os.path.abspath(__file__),
-                        "--", "--blender", payload], capture_output=True, text=True)
+    path = os.path.join(CACHE, "_cam_job.json")
+    json.dump(payload, open(path, "w"))
+    r = subprocess.run([find_blender(), "-b", "-noaudio", "--factory-startup", "--python",
+                        os.path.abspath(__file__), "--", "--blender", path], capture_output=True, text=True)
     for line in (r.stdout + r.stderr).splitlines():
         if line.startswith("CAMS") or "Traceback" in line or "Error:" in line:
             print("   ", line)
 
 
-# ------------------------------------------------------------------ Blender side
 def run_in_blender(payload: str) -> None:
     import bpy
     import numpy as np
@@ -448,22 +535,16 @@ def run_in_blender(payload: str) -> None:
     sys.path.insert(0, HERE)
     from unity_yaml import parse_prefab
     job = json.load(open(payload))
-    data = json.load(open(job["json"]))
-    fps = data["fps"]
 
-    bpy.ops.wm.read_factory_settings(use_empty=True)
-    scene = bpy.context.scene
-    scene.render.fps = fps
-
-    def import_fbx(path):
+    def import_fbx(path, anim=True):
         before = set(bpy.data.objects)
-        bpy.ops.import_scene.fbx(filepath=path, automatic_bone_orientation=False, ignore_leaf_bones=False)
+        bpy.ops.import_scene.fbx(filepath=path, use_anim=anim, automatic_bone_orientation=False,
+                                 ignore_leaf_bones=False)
         return [o for o in bpy.data.objects if o not in before]
 
-    base = import_fbx(job["base_fbx"])
-    arm = next(o for o in base if o.type == "ARMATURE")
-
-    # Unity world (character root at the origin) -> Blender, fitted on rest joints
+    # the rig exactly as export_anim_fbx imports it; Unity -> Blender fitted on its rest
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    arm = next(o for o in import_fbx(job["model"], anim=False) if o.type == "ARMATURE")
     nodes = parse_prefab(job["prefab"])
 
     def uworld(node):
@@ -487,94 +568,72 @@ def run_in_blender(payload: str) -> None:
     sol, *_ = np.linalg.lstsq(X, B, rcond=None)
     A, t = sol[:3].T, sol[3]
     sv = np.linalg.svd(A, compute_uv=False)
-    print(f"CAMS fit: {len(U)} bones, max residual {np.abs(X @ sol - B).max():.1e}, scale {sv.mean():.5f}")
+    print(f"CAMS fit on {os.path.basename(job['model'])}: {len(U)} bones, "
+          f"max residual {np.abs(X @ sol - B).max():.1e}, scale {sv.mean():.5f}")
+    scene = bpy.context.scene
 
-    # character: the schedule as NLA strips, baked to one action
-    frames_total = len(data["frames"])
-    sched = [s for s in job["schedule"] if s.get("fbx")]
-    if sched:
-        arm.animation_data_create()
-        base_action = arm.animation_data.action
-        arm.animation_data.action = None
-        track = arm.animation_data.nla_tracks.new()
-        actions = {}
-        for s in sched:
-            if s["fbx"] not in actions:
-                if s["fbx"] == job["base_fbx"]:
-                    actions[s["fbx"]] = base_action
-                else:
-                    objs = import_fbx(s["fbx"])
-                    a2 = next(o for o in objs if o.type == "ARMATURE")
-                    actions[s["fbx"]] = a2.animation_data.action
-                    for o in objs:
-                        bpy.data.objects.remove(o, do_unlink=True)
-            act = actions[s["fbx"]]
-            first = act.frame_range[0]
-            start = s["start"] * fps + 1
-            strip = track.strips.new(s["clip"] or "clip", int(round(start)), act)
-            strip.action_frame_start = first + s["clip_in"] * fps
-            strip.action_frame_end = first + (s["clip_in"] + s["duration"] * s["time_scale"]) * fps
-            strip.frame_start = start
-            strip.frame_end = start + s["duration"] * fps
-            # hold the first pose before and the last pose after, as the Timeline does
-            strip.extrapolation = ("HOLD" if s is sched[0] else "HOLD_FORWARD") if s is sched[-1] or s is sched[0] else "NOTHING"
-        scene.frame_start, scene.frame_end = 1, frames_total
+    for seq in job["sequences"]:
+        data = json.load(open(seq["json"]))
+        n = len(data["frames"])
+        scene.render.fps = data["fps"]
+        cam = bpy.data.objects.new(seq["stem"], bpy.data.cameras.new(seq["stem"]))
+        scene.collection.objects.link(cam)
+        cam.data.sensor_fit = "VERTICAL"
+        cam.data.clip_start = data["lens"]["NearClipPlane"] * float(sv.mean())
+        cam.data.clip_end = data["lens"]["FarClipPlane"] * float(sv.mean())
+        for f, fr in enumerate(data["frames"]):         # frame f = timeline t * fps, as the clips
+            r = np.array(q_mat(fr["rotation"]))
+            fwd, up = A @ r[:, 2], A @ r[:, 1]
+            zb = -fwd / np.linalg.norm(fwd)
+            yb = up - zb * np.dot(up, zb)
+            yb /= np.linalg.norm(yb)
+            xb = np.cross(yb, zb)
+            loc = A @ np.array(fr["position"]) + t
+            m = Matrix.Identity(4)
+            for i in range(3):
+                m[i][0], m[i][1], m[i][2], m[i][3] = xb[i], yb[i], zb[i], loc[i]
+            cam.matrix_world = m
+            cam.data.angle_y = math.radians(fr["fov"])
+            cam.keyframe_insert("location", frame=f)
+            cam.keyframe_insert("rotation_euler", frame=f)
+            cam.data.keyframe_insert("lens", frame=f)
+        for db in (cam, cam.data):
+            for fc in db.animation_data.action.fcurves:
+                for k in fc.keyframe_points:
+                    k.interpolation = "LINEAR"
+        scene.frame_start, scene.frame_end = 0, n - 1
         for o in bpy.data.objects:
-            o.select_set(o == arm)
-        bpy.context.view_layer.objects.active = arm
-        bpy.ops.nla.bake(frame_start=1, frame_end=frames_total, only_selected=False, visual_keying=True,
-                         clear_constraints=False, use_current_action=False, bake_types={"POSE"})
-        for tr in list(arm.animation_data.nla_tracks):
-            arm.animation_data.nla_tracks.remove(tr)
-        arm.animation_data.action.name = f"{job['stem']}"
+            o.select_set(o is cam)
+        # export_anim_fbx.export's settings, so camera and character share one space
+        bpy.ops.export_scene.fbx(filepath=seq["camera_fbx"], use_selection=True, apply_unit_scale=True,
+                                 apply_scale_options="FBX_SCALE_NONE", object_types={"CAMERA"},
+                                 add_leaf_bones=False, bake_anim=True, bake_anim_use_all_bones=True,
+                                 bake_anim_use_nla_strips=False, bake_anim_use_all_actions=False,
+                                 bake_anim_force_startend_keying=True, bake_anim_step=1.0,
+                                 bake_anim_simplify_factor=0.0, path_mode="STRIP")
+        bpy.data.objects.remove(cam, do_unlink=True)
+        print(f"CAMS wrote {os.path.basename(seq['camera_fbx'])} ({n} frames)")
 
-    cam = bpy.data.objects.new(f"{job['stem']}_camera", bpy.data.cameras.new(f"{job['stem']}_camera"))
-    scene.collection.objects.link(cam)
-    cam.data.sensor_fit = "VERTICAL"
-    s = float(sv.mean())
-    cam.data.clip_start = data["lens"]["NearClipPlane"] * s
-    cam.data.clip_end = data["lens"]["FarClipPlane"] * s
-    for f, fr in enumerate(data["frames"]):
-        r = np.array(q_mat(fr["rotation"]))
-        fwd, up = A @ r[:, 2], A @ r[:, 1]
-        zb = -fwd / np.linalg.norm(fwd)
-        yb = up - zb * np.dot(up, zb)
-        yb /= np.linalg.norm(yb)
-        xb = np.cross(yb, zb)
-        m = Matrix.Identity(4)
-        loc = A @ np.array(fr["position"]) + t
-        for i in range(3):
-            m[i][0], m[i][1], m[i][2], m[i][3] = xb[i], yb[i], zb[i], loc[i]
-        cam.matrix_world = m
-        cam.data.angle_y = math.radians(fr["fov"])
-        cam.keyframe_insert("location", frame=f + 1)
-        cam.keyframe_insert("rotation_euler", frame=f + 1)
-        cam.data.keyframe_insert("lens", frame=f + 1)
-    for datablock in (cam, cam.data):
-        for fc in datablock.animation_data.action.fcurves:
-            for k in fc.keyframe_points:
-                k.interpolation = "LINEAR"
-    scene.frame_start, scene.frame_end = 1, frames_total
-    scene.camera = cam
-
-    os.makedirs(job["preview"], exist_ok=True)
-    scene.render.engine = "BLENDER_WORKBENCH"
-    scene.render.resolution_x, scene.render.resolution_y = 640, 360
-    for f in sorted({1, frames_total // 5, 2 * frames_total // 5, 3 * frames_total // 5, 4 * frames_total // 5, frames_total}):
-        scene.frame_set(max(f, 1))
-        scene.render.filepath = os.path.join(job["preview"], f"frame_{max(f, 1):04d}.png")
-        bpy.ops.render.render(write_still=True)
-
-    def export(objs, path, types):
-        for o in bpy.data.objects:
-            o.select_set(o in objs)
-        bpy.ops.export_scene.fbx(filepath=path, use_selection=True, object_types=types, bake_anim=True,
-                                 bake_anim_use_all_actions=False, bake_anim_use_nla_strips=False,
-                                 add_leaf_bones=False)
-    export([cam], job["camera_fbx"], {"CAMERA"})
-    if sched:
-        export([o for o in bpy.data.objects if o is arm or o.parent is arm], job["character_fbx"], {"ARMATURE", "MESH"})
-    print(f"CAMS wrote {os.path.basename(job['camera_fbx'])}" + (f" + {os.path.basename(job['character_fbx'])}" if sched else ""))
+    # what a consumer sees: both final FBXs imported fresh, rendered through the camera
+    for seq in job["sequences"]:
+        if not os.path.isfile(seq["character_fbx"]):
+            continue
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        scene = bpy.context.scene
+        import_fbx(seq["character_fbx"])
+        cam = next(o for o in import_fbx(seq["camera_fbx"]) if o.type == "CAMERA")
+        scene.camera = cam
+        f0, f1 = (int(x) for x in cam.animation_data.action.frame_range)
+        scene.render.engine = "BLENDER_WORKBENCH"
+        scene.render.resolution_x, scene.render.resolution_y = 640, 360
+        os.makedirs(seq["preview"], exist_ok=True)
+        for old in glob.glob(os.path.join(seq["preview"], "*.png")):
+            os.remove(old)
+        for k in range(6):
+            f = f0 + (f1 - f0) * k // 5
+            scene.frame_set(f)
+            scene.render.filepath = os.path.join(seq["preview"], f"frame_{f:04d}.png")
+            bpy.ops.render.render(write_still=True)
 
 
 # ------------------------------------------------------------------ main
@@ -598,44 +657,50 @@ def main() -> int:
             if not project:
                 continue
             proj = Project(project)
-            prefabs = [p for p in glob.glob(os.path.join(proj.assets, "**", "*.prefab"), recursive=True)
-                       if "\n--- !u!320 " in _read(p)]
-            for prefab in sorted(prefabs):
+            job = clip_set_job(cid, skin, kind)
+            prefabs = sorted(p for p in glob.glob(os.path.join(proj.assets, "**", "*.prefab"), recursive=True)
+                             if "\n--- !u!320 " in _read(p))
+            merged_dir = os.path.join(CACHE, "_merged", f"{skin}_{kind}")
+            shutil.rmtree(merged_dir, ignore_errors=True)
+            os.makedirs(merged_dir)
+            done = []
+            for prefab in prefabs:
                 data = sequence(proj, prefab)
                 if not data:
                     continue
                 name = "win" if kind == "win" else data["sequence"]
-                data["sequence"] = name
                 if only and name not in only:
                     continue
+                data["sequence"] = name
                 stem = f"{skin}@{name}"
+                sched = data["character_schedule"]
+                if kind == "win":               # the win clip is an external the rip leaves unresolved
+                    src = win_source(job) if job else None
+                    sched = [{"clip": os.path.splitext(os.path.basename(src))[0], "start": 0.0,
+                              "duration": data["duration"], "clip_in": 0.0, "time_scale": 1.0,
+                              "anim": src}] if src else []
+                data["character_schedule"] = [{k: v for k, v in s.items() if k != "anim"} for s in sched]
+                data["character_fbx"] = f"{stem}.character.fbx"
                 js = os.path.join(out_dir, f"{stem}.camera.json")
-                ui = kind != "win"
-                sched = []
-                for s in data["character_schedule"]:
-                    s = dict(s, fbx=clip_fbx(cid, skin, s["clip"], kind))
-                    sched.append(s)
-                if kind == "win":               # its clip is an external the rip leaves unresolved
-                    fb = clip_fbx(cid, skin, None, kind)
-                    sched = [{"clip": "win", "start": 0.0, "duration": data["duration"], "clip_in": 0.0,
-                              "time_scale": 1.0, "fbx": fb}] if fb else []
-                for s in sched:
-                    s["fbx_name"] = os.path.basename(s["fbx"]) if s["fbx"] else None
-                data["character_schedule"] = [{k: v for k, v in s.items() if k != "fbx"} for s in sched]
                 json.dump(data, open(js, "w"), indent=1)
                 plan = ", ".join(f"{s['clip']}@{s['start']:g}s" for s in sched) or "-"
                 print(f"{stem}: {data['duration']:.2f}s, {len(data['camera_cuts'])} cut(s), character: {plan}")
-                if args.no_fbx:
-                    continue
-                base = next((s["fbx"] for s in sched if s["fbx"]), None)
-                prefab_rig = rig_prefab(skin, cid, ui)
-                if not base or not prefab_rig:
-                    print(f"   no character FBX / rig prefab (fbx {base}, prefab {prefab_rig}) - JSON only")
-                    continue
-                blender({"stem": stem, "json": js, "base_fbx": base, "prefab": prefab_rig, "schedule": sched,
-                         "camera_fbx": os.path.join(out_dir, f"{stem}.camera.fbx"),
-                         "character_fbx": os.path.join(out_dir, f"{stem}.character.fbx"),
-                         "preview": os.path.join(out_dir, f"{stem}_preview")})
+                if sched and all(s["anim"] and os.path.isfile(s["anim"]) for s in sched):
+                    write_merged_clip(os.path.join(merged_dir, f"{stem}.anim"), stem, sched, data["duration"])
+                done.append((stem, js))
+            if args.no_fbx or not done:
+                continue
+            if not job:
+                print(f"   no clip set / rig for {skin} {kind} - JSON only")
+                continue
+            names = [s for s, _ in done if os.path.isfile(os.path.join(merged_dir, f"{s}.anim"))]
+            if names:
+                export_characters(cid, job, merged_dir, names, out_dir)
+            blender({"model": job["model"], "prefab": job["prefab"],
+                     "sequences": [{"stem": s, "json": js,
+                                    "camera_fbx": os.path.join(out_dir, f"{s}.camera.fbx"),
+                                    "character_fbx": os.path.join(out_dir, f"{s}.character.fbx"),
+                                    "preview": os.path.join(out_dir, f"{s}_preview")} for s, js in done]})
     return 0
 
 
