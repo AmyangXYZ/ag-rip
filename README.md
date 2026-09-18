@@ -220,7 +220,7 @@ character and writes a contact sheet — read the names off it, save as `names.j
 | `ag.py scenes [--grep X]` | stage index: 544 codes across `comscene`, `comsceneq`, `comeffect`, `levels` (`--index` rebuilds, ~5 min) |
 | `ag.py stages [--char 1095]` | DLC skin → stage table + pictures → `AG_stage_names/` (`contact_sheet.html`) |
 | `ag.py stage x343` | one stage → standalone Unity project → `AG_stages/x343/` (`comeffect/x100` picks the folder; `sourcespace` = all 7 modifier-mode spaces in one project, a scene each) |
-| `ag.py wincam 109503 104701` | a skin's victory-sequence camera (win timeline `<skin>_win_uitpose`: `<cid>_Cam_Win` clip, Cinemachine lens, DOF) -> `AG_fbx_anim/<cid>/<skin>@win_camera.fbx` aligned to the character's win clip FBX (fitted on the rig rest pose), + `.json` (per-frame Unity-space pose, FOV) + preview frames |
+| `ag.py cams 109501 104701` | a skin's authored camera sequences - the victory pose (`storytimeline/win/<skin>_win_uitpose`) and every DLC home-screen interaction (`uitimeline/charactor/<skin>`: debut, action1_1, touch1, touch2 ...) - evaluated as Cinemachine does (rig clip, look-at composer + offset, Dutch, animated FOV; CRC32-hashed lens fields resolved) -> `AG_fbx_anim/<cid>/cameras/<skin>@<seq>.camera.fbx` + `.character.fbx` (the timeline's clip schedule baked into one action) + `.camera.json` + previews |
 | `agtools/stage_thumbs.py --prefix x` | render each stage (glb → Blender) → `AG_stage_names/render/` |
 | `agtools/bundle_deps.py <bundle>` | a bundle's full dependency closure (`--index` rebuilds the CAB map, ~8 min) |
 
