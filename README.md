@@ -322,6 +322,19 @@ root) playing excerpts of its clips, camera-cut blends and props.
   rest joints (residual ~1e-8), written with `export_anim_fbx`'s FBX settings, keyed on
   the same frames. `.camera.json` holds the per-frame pose in Unity space for engines.
 - Previews are rendered from the final FBXs re-imported fresh (what a consumer sees).
+- **Facial + lips + voice** (DLC interactions): the sequences play on the home-screen
+  model (`<skin>ui_tpose`: Eye / Eyebrow / Mouth / Pupil meshes with named blend shapes).
+  Facial curves come from the timeline's facial track (109501: `FacialAni*` clips; 104701:
+  inside the body clips) and are decoded straight from the bundle by `unity_clip.py` -
+  AssetRipper's YAML merges blend-shape curves it cannot name, losing them. Bindings are
+  CRC32(renderer path) / CRC32(channel name). Lip sync is the game's own pre-analysed data
+  (`crilipsexdata/<lang>.ys`, per voice cue, 30 fps A/I/U/E/O -> `Mouth_a..o`, overriding
+  the facial mouth while the voice plays, as `CriLipsExPlayer` does). Written into the
+  character FBX as standard blend-shape channel animation; `.character.fbx` has zh lips,
+  `.character.ja.fbx` ja lips. `ag.py voice` decodes CRI ACB/AWB banks to WAV with
+  vgmstream (`tools/vgmstream`, which knows the game's HCA key): voice from
+  `Voice/<lang>/` (zh installed; ja needs the game's Japanese voice pack downloaded first),
+  scene music/SFX from `ui_scene_<skin>.acb`. `agtools/cri_utf.py` reads @UTF tables.
 - Not included: the 1.5 s blend from/to the game's home camera at the start/end (the
   home camera is placed by game code; the cut times are in the JSON).
 
@@ -368,6 +381,7 @@ Re-run: `python tools/re/codephil.py metadata`, Il2CppDumper on it, then
 - Stages: Unity 6000.6.1f1 (path in `agtools/stage_unity.py`); `tools/USCSandbox`
   (upstream checkout + `tools/uscsandbox-aethergazer.patch`, built with the .NET SDK
   in `tools/dotnet` into `tools/uscs`; then `python tools/uscs_builtin_names.py`)
+- Audio: `tools/vgmstream` (vgmstream-cli release zip), Python `UnityPy`
 - Reverse engineering: `tools/Il2CppDumper`, `tools/ghidra_12.1.3_PUBLIC`, JDK 21 in
   `tools/jdk`, Python `unicorn` + `capstone`
 

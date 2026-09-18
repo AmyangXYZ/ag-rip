@@ -442,6 +442,61 @@ def run_in_blender(payload_path: str) -> None:
             scales.append(sc)
         return locs, quats, scales
 
+    def apply_morphs(morph_path, nframes):
+        """Blend-shape (morph) animation from a morph JSON, as shape-key actions.
+
+        JSON: {"channels": [{"mesh": <name or CRC32>, "shape": <name or CRC32>,
+        "values": [0..1 per frame]}]}. Unity binds blend-shape curves by CRC32 of the
+        renderer path and of the channel name, so both are matched by name or by CRC.
+        The FBX exporter writes shape-key animation as standard BlendShapeChannel
+        DeformPercent curves. Keyed at REST_FRAME = 0 like the bones, frames 0..n-1."""
+        import zlib
+        with open(morph_path, encoding="utf-8") as fh:
+            spec = json.load(fh)
+        meshes = {}
+        for o in bpy.data.objects:
+            if o.type == "MESH" and o.data.shape_keys:
+                base = o.name.split(".")[0]
+                meshes[base] = meshes[zlib.crc32(base.encode())] = o
+        per_mesh, missing = {}, 0
+        for ch in spec["channels"]:
+            o = meshes.get(ch["mesh"])
+            key = None
+            if o is not None:
+                for kb in o.data.shape_keys.key_blocks[1:]:
+                    if ch["shape"] in (kb.name, zlib.crc32(kb.name.encode())):
+                        key = kb
+                        break
+            if key is None:
+                missing += 1
+                continue
+            per_mesh.setdefault(o, []).append((key.name, ch["values"]))
+        made = []
+        for o, chans in per_mesh.items():
+            sk = o.data.shape_keys
+            sk.animation_data_create()
+            act = bpy.data.actions.new(f"{o.name}_morphs")
+            for kname, values in chans:
+                fc = act.fcurves.new(f'key_blocks["{kname}"].value')
+                n = min(len(values), nframes)
+                fc.keyframe_points.add(n + 1)
+                flat = [float(REST_FRAME), 0.0]
+                for f in range(n):
+                    flat += [float(f), float(values[f])]
+                fc.keyframe_points.foreach_set("co", flat)
+                fc.keyframe_points.foreach_set("interpolation", [1] * (n + 1))
+                fc.update()
+            sk.animation_data.action = act
+            made.append((sk, act))
+        return made, sum(len(c) for c in per_mesh.values()), missing
+
+    def clear_morphs(made):
+        for sk, act in made:
+            sk.animation_data.action = None
+            bpy.data.actions.remove(act)
+            for kb in sk.key_blocks[1:]:
+                kb.value = 0.0
+
     def write_curves(action, prefix, group, nframes, locs, quats, scales, rest=None):
         """Write baked TRS curves, preceded by one key holding the rest pose.
 
@@ -684,6 +739,11 @@ def run_in_blender(payload_path: str) -> None:
                                  job.get("prefix", "") + name)).strip("_")
             out_path = os.path.join(out_dir,
                                     f"{job['stem'].replace('_tpose', '')}@{safe}.fbx")
+            morphs = []
+            morph_json = job.get("morphs", {}).get(name)
+            if morph_json:
+                morphs, n_ok, n_miss = apply_morphs(morph_json, nframes)
+                note += f"  [{n_ok} morph curves" + (f", {n_miss} unmatched]" if n_miss else "]")
             try:
                 export(arm, action, out_path, fps, nframes)
                 mb = os.path.getsize(out_path) / 1e6
@@ -695,6 +755,7 @@ def run_in_blender(payload_path: str) -> None:
                 print(f"    [{i}/{len(job['clips'])}] {name}: EXPORT FAILED {exc}",
                       flush=True)
             finally:
+                clear_morphs(morphs)
                 if arm.animation_data:
                     arm.animation_data.action = None
                 bpy.data.actions.remove(action)

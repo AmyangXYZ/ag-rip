@@ -32,6 +32,13 @@ Output, AG_fbx_anim/<cid>/cameras/<skin>@<sequence>.*:
   .character.fbx   the character playing the schedule as one clip: the excerpts are
                    merged into a Unity clip and exported by export_anim_fbx itself, so it
                    matches the per-clip exports (rest key, facing; frame 0 = timeline 0)
+  DLC interactions additionally (built on the home-screen model <skin>ui_tpose, whose
+  Eye / Eyebrow / Mouth / Pupil meshes carry the morphs):
+  .character.fbx / .character.ja.fbx   + morph animation (standard FBX blend-shape channel
+                   curves, real channel names): the facial clips decoded from the bundle
+                   (unity_clip.py) + the game's pre-analysed lip sync (zh / ja) on Mouth_a..o
+  .morphs.<lang>.json   the same morph curves as data (CRC32 mesh / channel keys, 0..1)
+  .voice.<lang>.wav     the voice cue (debut: greet, touchN: talkN), .scene.wav the music/SFX
   _preview/        Workbench frames through the camera (checking)
 Run with system Python; the FBX step re-launches itself inside Blender.
 """
@@ -386,6 +393,25 @@ def sequence(proj: Project, prefab: str) -> dict | None:
             schedule.append({"clip": name, "start": round(c["start"], 5), "duration": round(c["duration"], 5),
                              "clip_in": round(c["clip_in"], 5), "time_scale": c["time_scale"], "anim": anim})
     schedule.sort(key=lambda s: s["start"])
+    # facial: "tpose" tracks whose clips drive blend shapes (SkinnedMeshRenderer, typeID 137)
+    facial = []
+    for t in tracks:
+        if t["muted"] or "tpose" not in t["name"] or t["name"].count("/") > 1                 or t["type"] not in ("AnimationTrack", "ManualAnimatorTrack"):
+            continue
+        entries = [dict(c, anim=c["anim"] or node_clip(proj, c["node"])) for c in t["clips"]]
+        entries = [c for c in entries if c["anim"]]
+        if t["infinite"]:
+            entries.append({"anim": t["infinite"], "start": 0.0, "duration": None, "clip_in": 0.0,
+                            "time_scale": 1.0, "infinite": True})
+        for c in entries:
+            body = _read(c["anim"])
+            n137 = body.count("typeID: 137")
+            if not n137:
+                continue
+            stop = float(_field(body.split("m_AnimationClipSettings:")[1], "m_StopTime") or 0)
+            facial.append({"clip": _field(body, "m_Name"), "stop": stop, "bindings": n137,
+                           "start": c["start"], "duration": c["duration"], "clip_in": c["clip_in"],
+                           "time_scale": c["time_scale"], "infinite": bool(c.get("infinite"))})
     cuts = []
     for t in tracks:
         if t["type"] == "StoryTimelineCameraCutTypeTrack" and not t["muted"]:
@@ -402,7 +428,7 @@ def sequence(proj: Project, prefab: str) -> dict | None:
             "lens": lens, "composer": {"tracked_object_offset": offset, "damping": damp, "screen": screen},
             "look_at": tf[look_tf]["name"] if look_tf else None,
             "camera_rig": "/".join(tf[x]["name"] for x in chain(vcam_tf)),
-            "character_schedule": schedule, "camera_cuts": cuts, "animated_props": props,
+            "character_schedule": schedule, "facial": facial, "camera_cuts": cuts, "animated_props": props,
             "frames": frames}
 
 
@@ -489,13 +515,15 @@ def write_merged_clip(path: str, name: str, schedule: list[dict], duration: floa
         fh.write("\n".join(out) + "\n")
 
 
-def export_characters(cid: str, job: dict, merged_dir: str, names: list[str], out_dir: str) -> None:
-    """Run the character exporter on the merged clips, then move them beside the cameras."""
+def export_characters(cid: str, job: dict, merged_dir: str, outputs: list[tuple[str, str, str | None]]) -> None:
+    """Run the character exporter on merged clips: (clip name, output path, morph JSON).
+    Morph JSONs become shape-key animation (standard FBX blend-shape channel curves)."""
     sys.path.insert(0, HERE)
     import export_anim_fbx
     tmp_out = os.path.join(CACHE, "_char_out")
     shutil.rmtree(tmp_out, ignore_errors=True)
-    j = dict(job, dir=merged_dir, clips=[f"{n}.anim" for n in names], prefix="")
+    j = dict(job, dir=merged_dir, clips=[f"{n}.anim" for n, _, _ in outputs], prefix="",
+             morphs={n: m for n, _, m in outputs if m})
     payload = os.path.join(CACHE, "_char_job.json")
     json.dump({"cid": cid, "out": tmp_out, "dry_run": False, "no_fold_root": False,
                "script_dir": HERE, "jobs": [j]}, open(payload, "w"))
@@ -506,13 +534,113 @@ def export_characters(cid: str, job: dict, merged_dir: str, names: list[str], ou
         if re.match(r"\s+\[\d+/\d+\]", line) or "basis fit" in line:
             print("   ", line.strip())
     produced = glob.glob(os.path.join(tmp_out, cid, "*.fbx"))
-    for n in names:
+    for n, dst, _ in outputs:
         tag = re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9._-]", "_", n)).strip("_")
         src = next((p for p in produced if os.path.basename(p).endswith(f"@{tag}.fbx")), None)
         if src:
-            shutil.move(src, os.path.join(out_dir, f"{n}.character.fbx"))
+            shutil.move(src, dst)
         else:
             print(f"    ! character export missing for {n}")
+
+
+# ------------------------------------------------------------------ facial, lips, audio
+VOICE_CUE = {"debut": "greet", "touch1": "talk1", "touch2": "talk2", "touch3": "talk3"}
+LIP_SHAPES = ("Mouth_a", "Mouth_i", "Mouth_u", "Mouth_e", "Mouth_o")   # CriLipsExPlayer A I U E O
+
+
+def rig_prefab(skin: str, cid: str, ui: bool) -> str | None:
+    base = os.path.join(SAMPLE, cid, "ExportedProject", "Assets")
+    stems = [f"{skin}ui_tpose", f"{cid}ui_tpose"] if ui else [f"{skin}_tpose", f"{cid}_tpose"]
+    for stem in stems:
+        hits = glob.glob(os.path.join(base, "**", f"{stem}.prefab"), recursive=True)
+        if hits:
+            return hits[0]
+    return None
+
+
+def ui_rig(skin: str, cid: str) -> tuple[str | None, str | None]:
+    """The home-screen model: the DLC interactions play on it, and its Eye / Eyebrow /
+    Mouth / Pupil meshes carry the morphs the facial clips drive."""
+    fbx = next(iter(glob.glob(os.path.join(ROOT, "AG_fbx", cid, "**", f"{skin}ui_tpose.fbx"), recursive=True)), None)
+    return fbx, rig_prefab(skin, cid, True)
+
+
+def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
+    """Per-frame morph values (0..1) for a sequence: the facial clips (decoded from the
+    bundle - AssetRipper's YAML merges the unnamed blend-shape curves) placed on the
+    timeline, then lip sync (the voice cue's pre-analysed A/I/U/E/O) over Mouth_a..o
+    while the voice plays, as CriLipsExPlayer does after the Animator."""
+    sys.path.insert(0, HERE)
+    import bundle_deps
+    import extract_voice
+    import unity_clip
+    n = len(data["frames"])
+    chans: dict[tuple, list[float]] = {}
+    if data.get("facial"):
+        # facial curves live in the timeline bundle (109501: FacialAni) or inside the body
+        # clips (104701: touch1x ...) in a dependency bundle - search both
+        root = SOURCES["dlc"].format(skin=skin)
+        index = bundle_deps.load_index()
+        bundles = [root] + sorted({index.get(c.lower()) or index.get(c) for c in
+                                   bundle_deps.externals(os.path.join(bundle_deps.ROOT, root))} - {None})
+        raw = []
+        for bnd in bundles:
+            if "shader" not in bnd.lower():
+                raw += unity_clip.load_clips(os.path.join(bundle_deps.ROOT, bnd), {f["clip"] for f in data["facial"]})
+        for f in data["facial"]:
+            clip = next((c for c in raw if c.name == f["clip"] and abs(c.stop - c.start - f["stop"]) < 0.05
+                         and sum(b["typeID"] == 137 for b in c.bindings) == f["bindings"]), None)
+            if clip is None:
+                print(f"    ! facial clip {f['clip']} ({f['stop']:.2f}s) not found in the bundle")
+                continue
+            for bi, b in enumerate(clip.bindings):
+                if b["typeID"] != 137:
+                    continue
+                vals = chans.setdefault((b["path"], b["attribute"]), [0.0] * n)
+                for i in range(n):
+                    t = i / FPS
+                    if f["infinite"]:
+                        lt = t
+                    elif f["start"] <= t < f["start"] + f["duration"]:
+                        lt = f["clip_in"] + (t - f["start"]) * f["time_scale"]
+                    else:
+                        continue
+                    vals[i] = clip.value(bi, min(max(lt, 0.0), clip.stop - clip.start))[0] / 100.0
+    cue = VOICE_CUE.get(data["sequence"])
+    lip = extract_voice.lips(f"vo_sys_{skin}", lang).get(f"v_s_{skin}_{cue}") if lang and cue else None
+    if lip:
+        mouth = zlib.crc32(b"Mouth")
+        for k, shape in enumerate(LIP_SHAPES):
+            vals = chans.setdefault((mouth, zlib.crc32(shape.encode())), [0.0] * n)
+            for i, fr in enumerate(lip["aiueo"][:n]):
+                vals[i] = fr[k]
+    spec = {"fps": FPS, "frames": n, "lips": f"v_s_{skin}_{cue} ({lang})" if lip else None,
+            "note": "mesh / shape are CRC32 of the SkinnedMeshRenderer path and the blend-shape "
+                    "channel name (e.g. CRC32('Mouth'), CRC32('Mouth_a')); values 0..1",
+            "channels": [{"mesh": m, "shape": s, "values": [round(v, 4) for v in vals]}
+                         for (m, s), vals in chans.items()]}
+    json.dump(spec, open(path, "w"))
+    return len(chans)
+
+
+def export_audio(skin: str, seq: str, out_dir: str, stem: str, langs: list[str]) -> list[str]:
+    """The sequence's voice (per language) and scene music/SFX, as WAVs starting at t=0."""
+    sys.path.insert(0, HERE)
+    import extract_voice
+    made = []
+    cue = VOICE_CUE.get(seq)
+    for lang in langs:
+        if cue:
+            wavs = extract_voice.decode(f"vo_sys_{skin}", lang)
+            w = wavs.get(f"v_s_{skin}_{cue}")
+            if w:
+                shutil.copyfile(w, os.path.join(out_dir, f"{stem}.voice.{lang}.wav"))
+                made.append(f"voice.{lang}")
+    scene = extract_voice.decode(f"ui_scene_{skin}", None).get(f"ui_scene_{skin}_{seq}")
+    if scene:
+        shutil.copyfile(scene, os.path.join(out_dir, f"{stem}.scene.wav"))
+        made.append("scene")
+    return made
 
 
 # ------------------------------------------------------------------ camera FBX (Blender)
@@ -645,6 +773,7 @@ def main() -> int:
     ap.add_argument("skins", nargs="+", help="skin ids, e.g. 109501 104701")
     ap.add_argument("--only", help="comma list of sequences (win, debut, touch1, ...)")
     ap.add_argument("--no-fbx", action="store_true", help="JSON only")
+    ap.add_argument("--lang", default="zh,ja", help="voice / lip-sync languages (first = default character.fbx)")
     args = ap.parse_args()
     only = set(args.only.split(",")) if args.only else None
     os.makedirs(CACHE, exist_ok=True)
@@ -658,6 +787,11 @@ def main() -> int:
                 continue
             proj = Project(project)
             job = clip_set_job(cid, skin, kind)
+            langs = args.lang.split(",")
+            if kind == "dlc" and job:                    # the interactions play on the home-screen model
+                ui_fbx, ui_prefab = ui_rig(skin, cid)
+                if ui_fbx and ui_prefab:
+                    job = dict(job, model=ui_fbx, prefab=ui_prefab, stem=f"{skin}ui_tpose")
             prefabs = sorted(p for p in glob.glob(os.path.join(proj.assets, "**", "*.prefab"), recursive=True)
                              if "\n--- !u!320 " in _read(p))
             merged_dir = os.path.join(CACHE, "_merged", f"{skin}_{kind}")
@@ -687,15 +821,36 @@ def main() -> int:
                 print(f"{stem}: {data['duration']:.2f}s, {len(data['camera_cuts'])} cut(s), character: {plan}")
                 if sched and all(s["anim"] and os.path.isfile(s["anim"]) for s in sched):
                     write_merged_clip(os.path.join(merged_dir, f"{stem}.anim"), stem, sched, data["duration"])
+                if kind == "dlc" and not args.no_fbx:
+                    audio = export_audio(skin, name, out_dir, stem, langs)
+                    if audio:
+                        print(f"   audio: {', '.join(audio)}")
                 done.append((stem, js))
             if args.no_fbx or not done:
                 continue
             if not job:
                 print(f"   no clip set / rig for {skin} {kind} - JSON only")
                 continue
-            names = [s for s, _ in done if os.path.isfile(os.path.join(merged_dir, f"{s}.anim"))]
-            if names:
-                export_characters(cid, job, merged_dir, names, out_dir)
+            outputs = []
+            for s_, js_ in done:
+                merged = os.path.join(merged_dir, f"{s_}.anim")
+                if not os.path.isfile(merged):
+                    continue
+                data_ = json.load(open(js_))
+                if kind != "dlc":
+                    outputs.append((s_, os.path.join(out_dir, f"{s_}.character.fbx"), None))
+                    continue
+                for li, lang in enumerate(langs):  # one character FBX per lip-sync language
+                    mj = os.path.join(out_dir, f"{s_}.morphs.{lang}.json")
+                    nch = build_morphs(skin, data_, lang, mj)
+                    clip = s_ if li == 0 else f"{s_}__{lang}"
+                    if li:
+                        shutil.copyfile(merged, os.path.join(merged_dir, f"{clip}.anim"))
+                    suffix = "" if li == 0 else f".{lang}"
+                    outputs.append((clip, os.path.join(out_dir, f"{s_}.character{suffix}.fbx"), mj))
+                    print(f"   morphs [{lang}]: {nch} channels -> {os.path.basename(mj)}")
+            if outputs:
+                export_characters(cid, job, merged_dir, outputs)
             blender({"model": job["model"], "prefab": job["prefab"],
                      "sequences": [{"stem": s, "json": js,
                                     "camera_fbx": os.path.join(out_dir, f"{s}.camera.fbx"),
