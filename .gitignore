@@ -1,0 +1,16 @@
+# Whitelist: only the tooling is versioned. Game files, extracted data (AG_*),
+# exports and third-party tool binaries stay local.
+/*
+!/.gitignore
+!/README.md
+!/ag.py
+!/agtools/
+!/tools/
+/tools/*
+!/tools/re/
+!/tools/uscsandbox-aethergazer.patch
+!/tools/uscs_builtin_names.py
+!/tools/dxbc_disasm.py
+
+__pycache__/
+*.pyc
