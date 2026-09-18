@@ -220,7 +220,7 @@ character and writes a contact sheet — read the names off it, save as `names.j
 | `ag.py scenes [--grep X]` | stage index: 544 codes across `comscene`, `comsceneq`, `comeffect`, `levels` (`--index` rebuilds, ~5 min) |
 | `ag.py stages [--char 1095]` | DLC skin → stage table + pictures → `AG_stage_names/` (`contact_sheet.html`) |
 | `ag.py stage x343` | one stage → standalone Unity project → `AG_stages/x343/` (`comeffect/x100` picks the folder; `sourcespace` = all 7 modifier-mode spaces in one project, a scene each) |
-| `ag.py cams 109501 104701` | a skin's authored camera sequences - the victory pose (`storytimeline/win/<skin>_win_uitpose`) and every DLC home-screen interaction (`uitimeline/charactor/<skin>`: debut, action1_1, touch1, touch2 ...) - evaluated as Cinemachine does (rig clip, look-at composer + offset, Dutch, animated FOV; CRC32-hashed lens fields resolved) -> `AG_fbx_anim/<cid>/cameras/<skin>@<seq>.camera.fbx` + `.character.fbx` (the timeline's clip schedule baked into one action) + `.camera.json` + previews |
+| `ag.py cams 109501 104701` | a skin's authored camera sequences (victory pose + every DLC home-screen interaction) -> `AG_fbx_anim/<cid>/cameras/<skin>@<seq>.camera.fbx` + `.character.fbx` + `.camera.json` + previews - see "Camera sequences" |
 | `agtools/stage_thumbs.py --prefix x` | render each stage (glb → Blender) → `AG_stage_names/render/` |
 | `agtools/bundle_deps.py <bundle>` | a bundle's full dependency closure (`--index` rebuilds the CAB map, ~8 min) |
 
@@ -299,6 +299,31 @@ character and writes a contact sheet — read the names off it, save as `names.j
   `AG_pipeline/` + this stage's slice of `volume_components.json`).
   Built with Unity 6000.6.1f1 (the game is 2022.3.62f3; both import cleanly).
   Open `AG_stages/<code>/ExportedProject`, not the folder above it.
+
+## Camera sequences
+
+`ag.py cams <skin>` exports every camera the game authors for a skin: the victory pose
+(`storytimeline/win/<skin>_win_uitpose`) and the DLC home-screen interactions
+(`uitimeline/charactor/<skin>`: `debut`, `action1_1`, `touch1`, `touch2`). Each is a
+Timeline prefab: a camera rig (`<x>_cam/rotation&position` + `lookat` + a Cinemachine
+VirtualCamera) driven by a recorded clip, the character (bound at runtime at the timeline
+root) playing excerpts of its clips, camera-cut blends and props.
+
+- **Camera**: evaluated as Cinemachine does - rig transforms from the clip, Composer aim
+  at `lookat` + `m_TrackedObjectOffset` (no damping, centred), `m_Lens.Dutch` roll,
+  animated `m_Lens.FieldOfView` (vertical). Clip-driven Cinemachine fields are stored
+  as CRC32-hashed script attributes and are resolved by name.
+- **Character**: the timeline's clip schedule (start, clip-in, duration per excerpt) is
+  merged into one Unity clip and exported by `export_anim_fbx` itself, so
+  `.character.fbx` has exactly the conventions of the per-clip FBXs (rest key, facing,
+  root fold) - frame 0 = timeline 0. Do not splice exported FBXs in Blender instead: the
+  re-export loses the rest-key bind pose and the retargeted facing comes out wrong.
+- **Camera FBX**: placed on the same rig import with a Unity->Blender mapping fitted on the
+  rest joints (residual ~1e-8), written with `export_anim_fbx`'s FBX settings, keyed on
+  the same frames. `.camera.json` holds the per-frame pose in Unity space for engines.
+- Previews are rendered from the final FBXs re-imported fresh (what a consumer sees).
+- Not included: the 1.5 s blend from/to the game's home camera at the start/end (the
+  home camera is placed by game code; the cut times are in the JSON).
 
 ## Reverse engineering the render pipeline (tools/re)
 
