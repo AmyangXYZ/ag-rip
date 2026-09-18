@@ -92,6 +92,8 @@ public class AGSimPipeline : MonoBehaviour
         SetGlobals();
         if (additionalLights) AssignObjectLights();
         AssignRenderingLayers();
+        // the depth grab needs the camera depth texture decided before the camera renders
+        foreach (var c in FindObjectsOfType<Camera>()) c.depthTextureMode |= DepthTextureMode.Depth;
     }
 
     void Update()
@@ -138,7 +140,7 @@ public class AGSimPipeline : MonoBehaviour
     // (CartoonWater*, Ripplet) reads them for depth fade, foam, intersection and refraction.
     // Built-in equivalent: the camera depth texture (drawn from the SHADOWCASTER passes, so
     // their shadow bias is zeroed first) copied to R32 by Hidden/AG/CopyDepth, and a colour
-    // copy, both after the skybox.
+    // copy, both before the transparents (BeforeForwardAlpha: runs with or without a skybox).
     const string GrabName = "AG grab opaque + depth";
     static readonly int OpaqueId = Shader.PropertyToID("_CameraOpaqueTexture");
     static readonly int DepthCopyId = Shader.PropertyToID("_AGDepthCopy");
@@ -147,7 +149,7 @@ public class AGSimPipeline : MonoBehaviour
     static void EnsureGrab(Camera cam)
     {
         cam.depthTextureMode |= DepthTextureMode.Depth;
-        foreach (var b in cam.GetCommandBuffers(CameraEvent.AfterSkybox))
+        foreach (var b in cam.GetCommandBuffers(CameraEvent.BeforeForwardAlpha))
             if (b.name == GrabName) return;
         if (!_copyDepth)
         {
@@ -163,10 +165,11 @@ public class AGSimPipeline : MonoBehaviour
         cb.Blit(BuiltinRenderTextureType.CurrentActive, OpaqueId);
         cb.SetGlobalTexture("_OpaqueTexture", OpaqueId);
         cb.GetTemporaryRT(DepthCopyId, -1, -1, 0, FilterMode.Point, RenderTextureFormat.RFloat);
-        cb.Blit(BuiltinRenderTextureType.None, DepthCopyId, _copyDepth);
+        cb.Blit(BuiltinRenderTextureType.CurrentActive, DepthCopyId, _copyDepth);
         cb.SetGlobalTexture("_DepthIntermediate", DepthCopyId);
         cb.EnableShaderKeyword("HAS_DEPTH_BUFFER");
-        cam.AddCommandBuffer(CameraEvent.AfterSkybox, cb);
+        cb.SetRenderTarget(BuiltinRenderTextureType.CameraTarget);   // blits leave the copy bound
+        cam.AddCommandBuffer(CameraEvent.BeforeForwardAlpha, cb);
     }
 
     // ---------------------------------------------------------------- scene data

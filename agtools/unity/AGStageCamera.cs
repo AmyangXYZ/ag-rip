@@ -20,6 +20,7 @@ public class AGStageCamera : MonoBehaviour
         var go = new GameObject("AGStageCamera (generated)") { hideFlags = HideFlags.DontSave, tag = "MainCamera" };
         var cam = go.AddComponent<Camera>();
         cam.allowHDR = true;
+        cam.depthTextureMode = DepthTextureMode.Depth;  // the pipeline's depth grab (AGSimPipeline)
         cam.clearFlags = CameraClearFlags.SolidColor;   // the stage draws its own sky
         cam.backgroundColor = Color.black;
         cam.nearClipPlane = 0.05f;

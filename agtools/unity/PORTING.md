@@ -64,6 +64,12 @@ The live pipeline is `UnityEngine.Rendering.Replica` / `ReplicaExt`, which is UR
   - `_SubtractiveShadowColor = linear(realtimeShadowColor)`.
   - `sim_Time = (t − floor t, floor t, 0, 0)`.
   - `sim_VertexAmbientScale`, shadow scatter.
+- **Grab textures** (`ReplicaRenderer.CreateGrabRenderTextures`), after the opaques and before the transparents:
+  - colour → `_CameraOpaqueTexture` and `_OpaqueTexture`;
+  - depth (R32, raw reversed-Z device depth) → `_CameraDepthTexture` and `_DepthIntermediate`;
+  - keyword `HAS_DEPTH_BUFFER`.
+
+  Water (`CartoonWater*`, `Ripplet`) needs them for depth fade, foam, shoreline intersection and refraction. Without depth the whole surface reads as shoreline, e.g. x348's sea turns white.
 - **Shadows:** cascaded, through each material's `SHADOWCASTER` pass.
   - Settings from `CascadeShadowSetting`.
   - Reversed-Z with a compare sampler, URP receiver matrices.
