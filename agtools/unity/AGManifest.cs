@@ -47,7 +47,7 @@ public static class AGManifest
         "SimAdditionalLightAttenuation", "SimAdditionalLightSpotDir",
         "_AdditionalLightsPosition", "_AdditionalLightsColor", "_AdditionalLightsAttenuation",
         "_AdditionalLightsSpotDir", "_AdditionalLightsExtra" };
-    static readonly string[] Keywords = { "SIM_MAIN_LIGHT", "SIM_ADDITIONAL_LIGHT", "PLUS_LIGHTING", "MAIN_LIGHT_SHADOWS",
+    static readonly string[] Keywords = { "SIM_MAIN_LIGHT", "HAS_DEPTH_BUFFER", "SIM_ADDITIONAL_LIGHT", "PLUS_LIGHTING", "MAIN_LIGHT_SHADOWS",
         "SIM_REGIONAL_SHADOW", "sim_FOG_LINEAR", "sim_DYN_FOG_LINEAR", "sim_DYN_FOG_EXP", "sim_DYN_FOG_EXP_SQ", "LIGHTMAP_ON" };
 
     static bool Wanted(MonoBehaviour mb)

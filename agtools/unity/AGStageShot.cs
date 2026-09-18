@@ -3,6 +3,8 @@
 //             -agScene Assets/.../X305.unity -agOut C:\path\shot
 // Writes <out>_high.png and <out>_eye.png (framed on the renderers' 10th-90th percentile
 // bounds), or with -agView <out>_view.png from the stage's viewpoint (AGStageCamera).
+// -agFocus <object> shoots one object close up; -agHide <regex> deactivates objects first;
+// -agSet <material>.<prop>=<value>,... overrides material floats for the shot (not saved).
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -29,6 +31,27 @@ public static class AGStageShot
     {
         EditorSceneManager.OpenScene(Arg("-agScene"));
         string outp = Arg("-agOut");
+        string hide = Arg("-agHide");       // diagnosis: deactivate objects whose name matches
+        if (hide != null)
+        {
+            var rx = new System.Text.RegularExpressions.Regex(hide);
+            int n = 0;
+            foreach (var t in Object.FindObjectsByType<Transform>(FindObjectsSortMode.None))
+                if (t && rx.IsMatch(t.name)) { t.gameObject.SetActive(false); n++; }
+            Debug.Log($"AGStageShot: hid {n} object(s) matching {hide}");
+        }
+        string set = Arg("-agSet");         // diagnosis: <material>.<float prop>=<value>[,...]
+        if (set != null)
+            foreach (var item in set.Split(','))
+            {
+                var kv = item.Split('=');
+                int dot = kv[0].LastIndexOf('.');
+                string mat = kv[0].Substring(0, dot), prop = kv[0].Substring(dot + 1);
+                foreach (var r in Object.FindObjectsByType<Renderer>(FindObjectsSortMode.None))
+                    foreach (var m in r.sharedMaterials)
+                        if (m && m.name == mat) m.SetFloat(prop, float.Parse(kv[1], System.Globalization.CultureInfo.InvariantCulture));
+                Debug.Log($"AGStageShot: {mat}.{prop} = {kv[1]}");
+            }
         var rs = Object.FindObjectsByType<Renderer>(FindObjectsSortMode.None)
                        .Where(r => r.enabled && r.gameObject.activeInHierarchy).ToList();
         var sizes = rs.Select(r => r.bounds.size.magnitude).OrderBy(s => s).ToList();

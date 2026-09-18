@@ -129,6 +129,44 @@ public class AGSimPipeline : MonoBehaviour
         Shader.SetGlobalVector("sim_Time", new Vector4(t - Mathf.Floor(t), Mathf.Floor(t), 0f, 0f));
         Matrix4x4 vp = GL.GetGPUProjectionMatrix(cam.projectionMatrix, true) * cam.worldToCameraMatrix;
         Shader.SetGlobalMatrix("_NonJitteredViewProjMatrix", vp);
+        EnsureGrab(cam);
+    }
+
+    // ReplicaRenderer.CreateGrabRenderTextures: after the opaques the game copies colour to
+    // _CameraOpaqueTexture (+ _OpaqueTexture) and depth (R32, raw device depth) to
+    // _CameraDepthTexture (+ _DepthIntermediate) and enables HAS_DEPTH_BUFFER. Water
+    // (CartoonWater*, Ripplet) reads them for depth fade, foam, intersection and refraction.
+    // Built-in equivalent: the camera depth texture (drawn from the SHADOWCASTER passes, so
+    // their shadow bias is zeroed first) copied to R32 by Hidden/AG/CopyDepth, and a colour
+    // copy, both after the skybox.
+    const string GrabName = "AG grab opaque + depth";
+    static readonly int OpaqueId = Shader.PropertyToID("_CameraOpaqueTexture");
+    static readonly int DepthCopyId = Shader.PropertyToID("_AGDepthCopy");
+    static Material _copyDepth;
+
+    static void EnsureGrab(Camera cam)
+    {
+        cam.depthTextureMode |= DepthTextureMode.Depth;
+        foreach (var b in cam.GetCommandBuffers(CameraEvent.AfterSkybox))
+            if (b.name == GrabName) return;
+        if (!_copyDepth)
+        {
+            var sh = Shader.Find("Hidden/AG/CopyDepth");
+            if (!sh) return;
+            _copyDepth = new Material(sh) { hideFlags = HideFlags.HideAndDontSave };
+        }
+        var pre = new CommandBuffer { name = GrabName };
+        pre.SetGlobalVector("sim_ShadowBias", Vector4.zero);
+        cam.AddCommandBuffer(CameraEvent.BeforeDepthTexture, pre);
+        var cb = new CommandBuffer { name = GrabName };
+        cb.GetTemporaryRT(OpaqueId, -1, -1, 0, FilterMode.Bilinear, RenderTextureFormat.DefaultHDR);
+        cb.Blit(BuiltinRenderTextureType.CurrentActive, OpaqueId);
+        cb.SetGlobalTexture("_OpaqueTexture", OpaqueId);
+        cb.GetTemporaryRT(DepthCopyId, -1, -1, 0, FilterMode.Point, RenderTextureFormat.RFloat);
+        cb.Blit(BuiltinRenderTextureType.None, DepthCopyId, _copyDepth);
+        cb.SetGlobalTexture("_DepthIntermediate", DepthCopyId);
+        cb.EnableShaderKeyword("HAS_DEPTH_BUFFER");
+        cam.AddCommandBuffer(CameraEvent.AfterSkybox, cb);
     }
 
     // ---------------------------------------------------------------- scene data

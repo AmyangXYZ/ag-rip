@@ -37,7 +37,7 @@ headless), built with tools/dotnet and patched for this game:
   - fix_cbuffers.py afterwards: the Forward+ bin/tile tables become real cbuffers again
 The full diff is tools/uscsandbox-aethergazer.patch.
 Every keyword variant is kept, each as an #if block, so this is the lossless
-record of the game's shading; stage_unity.py --real-shaders installs from here.
+record of the game's shading; stage_unity.py installs from here.
 Rebuild the tool after editing it:
     tools/dotnet/dotnet build tools/USCSandbox/USCSandbox/USCSandbox.csproj -c Release -o tools/uscs
 """

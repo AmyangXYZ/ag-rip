@@ -61,7 +61,8 @@ VIEWPOINTS = {
     "X10a": ([-2.2, 2.7, 16.5], [0.0, 180.0, 0.0], 35.0),     # home 6000, night
     "X202": ([-9.2, 2.2, 12.0], [-4.0, 180.0, 0.0], 50.0),     # home 6100
     "X202a": ([-9.2, 2.2, 12.0], [-4.0, 180.0, 0.0], 50.0),
-    "X305": ([0.9, 1.55, 2.3], [4.9, -135.0, 0.0], 45.0),     # 1095 DLC piano stage (109501)
+    "X305": ([0.9, 1.55, 2.3], [4.9, -135.0, 0.0], 45.0),      # 1095 DLC piano stage (109501)
+    "X348": ([-10.0, 5.0, -44.0], [6.0, 180.0, 0.0], 45.0),    # 1095 DLC wedding terrace (109503), provisional
 }
 UNITY = r"C:\Program Files\Unity\Hub\Editor\6000.6.1f1\Editor\Unity.exe"
 PIPELINE_REF = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "AG_pipeline")
@@ -170,7 +171,7 @@ def set_linear_color_space(project: str) -> bool:
 HELPERS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "unity")
 EDITOR_HELPERS = ("AGStageShot.cs", "AGOpenStage.cs")
 PIPELINE_EDITOR_HELPERS = ("AGManifest.cs", "AGPrefabScenes.cs", "AGEditorPlayback.cs")   # need AGTools
-RUNTIME_HELPERS = ("AGSimPipeline.cs", "AGVolumes.cs", "AGSimShadows.cs", "AGSimPostFX.cs", "AGStageCamera.cs", "AGLutStrip.shader")
+RUNTIME_HELPERS = ("AGSimPipeline.cs", "AGVolumes.cs", "AGSimShadows.cs", "AGSimPostFX.cs", "AGStageCamera.cs", "AGLutStrip.shader", "AGCopyDepth.shader")
 
 
 def copy_helpers(project: str) -> None:
