@@ -66,6 +66,7 @@ COMMANDS = {
     "audit": ("audit_clips.py", "account for every clip in the tree; show any gaps"),
     "scenes": ("scenes.py", "index and export the 3D stages"),
     "stage": ("stage_unity.py", "one stage -> standalone Unity project (AG_stages)"),
+    "wincam": ("export_win_camera.py", "a skin's victory camera -> camera FBX + JSON beside its win clip"),
     "stages": ("stage_catalog.py", "DLC skin -> stage table with previews (AG_stage_names)"),
     "rig": ("export_fbx.py", "export the rigged, textured FBX"),
     "prefab": ("extract_character.py", "extract the prefab (bind pose) via AssetRipper"),
