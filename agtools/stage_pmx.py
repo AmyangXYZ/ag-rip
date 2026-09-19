@@ -35,11 +35,13 @@ CONVERTER = os.path.join(ROOT, "tools", "unity-stage", "unity_to_pmx.py")
 OUT = r"C:\AetherGazerStarter\AG_pmx"
 
 
-def scene_for(project: str, code: str) -> str | None:
+def scene_for(stage_dir: str, code: str) -> str | None:
     """The one scene this stage is. A project holds exactly one for a level
     export; when it holds several (the prefab-mode spaces, one scene per
     prefab), the code names which — that is how the folder was built."""
-    scenes = stage_unity.find_scenes(project)
+    # find_scenes takes the stage folder (it looks under <dir>/ExportedProject/Assets) and
+    # returns paths relative to it; the converter wants them relative to the project itself.
+    scenes = [os.path.relpath(s, "ExportedProject") for s in stage_unity.find_scenes(stage_dir)]
     if not scenes:
         return None
     if len(scenes) == 1:
@@ -51,11 +53,12 @@ def scene_for(project: str, code: str) -> str | None:
 
 def convert(code: str, extra: list[str]) -> int:
     name = code.rsplit("/", 1)[-1].upper()
-    project = os.path.join(stage_unity.OUT, code.rsplit("/", 1)[-1], "ExportedProject")
+    stage_dir = os.path.join(stage_unity.OUT, code.rsplit("/", 1)[-1])
+    project = os.path.join(stage_dir, "ExportedProject")
     if not os.path.isdir(project):
         print(f"{code}: no export at {project} - run `python ag.py stage {code}` first", file=sys.stderr)
         return 2
-    scene = scene_for(project, code)
+    scene = scene_for(stage_dir, code)
     if not scene:
         print(f"{code}: no .unity scene under {project}", file=sys.stderr)
         return 2
