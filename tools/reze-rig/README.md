@@ -22,7 +22,7 @@ rebuild this file.
 
 `python ag.py vmd <skin> --target-pmx <model.pmx>` (`agtools/to_vmd.py`) converts every
 sequence in `AG_fbx_anim/<cid>/cameras/` (`.character.fbx` + `.camera.fbx`) into
-`AG_vmd/<cid>/cameras/` and copies the sequence's `.wav` beside the VMDs. Directly:
+`AG_dlc_scene/<skin>/` and copies the sequence's `.wav` beside the VMDs. Directly:
 
 ```
 node tools/reze-rig/fbx2vmd.mjs <x>.character.fbx <x>.camera.fbx --out <dir> \

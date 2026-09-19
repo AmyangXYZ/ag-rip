@@ -9,7 +9,7 @@ For each <skin>@<seq> in AG_fbx_anim/<cid>/cameras/ (written by `ag.py cams`):
                                                facial / lip morphs as MMD morphs
   <seq>.camera.fbx    -> <seq>.camera.vmd      the sequence's camera, sized by the character
   <seq>.wav           copied beside them        voice + scene music, one track
-into AG_vmd/<cid>/cameras/. Everything starts at frame 0.
+into AG_dlc_scene/<skin>/ (e.g. AG_dlc_scene/109501/). Everything starts at frame 0.
 
 The converter is reze-rig's scripts/fbx2vmd.ts (https://github.com/AmyangXYZ/reze-rig,
 MIT), vendored as a bundle in tools/reze-rig/ - see its README. Needs Node.js.
@@ -35,7 +35,7 @@ def main() -> int:
     ap.add_argument("skins", nargs="+", help="skin ids, e.g. 109501 104701")
     ap.add_argument("--target-pmx", required=True, help="the MMD model to retarget onto (its morphs name the VMD's)")
     ap.add_argument("--only", help="comma list of sequences (touch1, debut, win, ...)")
-    ap.add_argument("--out", help="output folder (default AG_vmd/<cid>/cameras)")
+    ap.add_argument("--out", help="output folder (default AG_dlc_scene/<skin>)")
     args = ap.parse_args()
     if not os.path.isfile(FBX2VMD):
         sys.exit(f"error: {FBX2VMD} missing (see tools/reze-rig/README.md to rebuild it)")
@@ -45,7 +45,7 @@ def main() -> int:
     for skin in args.skins:
         cid = skin[:4]
         src = os.path.join(ROOT, "AG_fbx_anim", cid, "cameras")
-        out = args.out or os.path.join(ROOT, "AG_vmd", cid, "cameras")
+        out = args.out or os.path.join(ROOT, "AG_dlc_scene", skin)
         os.makedirs(out, exist_ok=True)
         for cam in sorted(glob.glob(os.path.join(src, f"{skin}@*.camera.fbx"))):
             stem = os.path.basename(cam)[:-len(".camera.fbx")]
