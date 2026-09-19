@@ -432,8 +432,14 @@ def sequence(proj: Project, prefab: str) -> dict | None:
     tracks = collect_tracks(proj, playable)
 
     vcam = next(((f, b) for f, (c, b) in docs.items() if c == "114" and "m_Lens:" in b and "m_Priority" in b), None)
-    if vcam is None:
-        return None
+    if vcam is None:                    # no camera rig: stays on the home camera
+        ends = [c["start"] + c["duration"] for t in tracks if not t["muted"] for c in t["clips"]]
+        if not ends:
+            return None
+        duration = max(ends)
+        frames = [{"t": round(min(i / FPS, duration), 5)} for i in range(int(round(duration * FPS)) + 1)]
+        return _sequence_data(proj, prefab, playable, tracks, duration, frames,
+                              {"camera_enabled": False, "camera_rig": None})
     vcam_go = _ref(_field(vcam[1], "m_GameObject"))[0]
     vcam_tf = tf_of_go[vcam_go]
     look_tf = _ref(_field(vcam[1], "m_LookAt"))[0]
@@ -545,6 +551,15 @@ def sequence(proj: Project, prefab: str) -> dict | None:
                        "fov": round(fov, 4), "dutch": round(dutch, 4),
                        "look_at": [round(c, 6) for c in target] if target else None})
 
+    return _sequence_data(proj, prefab, playable, tracks, duration, frames, {
+        "lens": lens, "composer": composer.describe(), "camera_enabled": vcam_enabled,
+        "look_at": tf[look_tf]["name"] if look_tf else None,
+        "camera_rig": "/".join(tf[x]["name"] for x in chain(vcam_tf))})
+
+
+def _sequence_data(proj: Project, prefab: str, playable: str, tracks: list[dict], duration: float,
+                   frames: list[dict], camera: dict) -> dict:
+    """Everything but the camera: character clip schedule, facial clips, audio cues, cuts."""
     schedule = []
     for t in tracks:
         if t["muted"] or "tpose" not in t["name"] or t["name"].count("/") > 1:
@@ -588,14 +603,23 @@ def sequence(proj: Project, prefab: str) -> dict | None:
                              "blend_time": float(_field(body, "m_Time") or 0)})
     props = sorted({t["name"].split("/")[-1] for t in tracks
                     if not t["muted"] and t["name"].count("/") > 1 and t["type"].endswith("AnimationTrack")})
+    # audio the timeline itself starts (StoryCriwareTrack): the scene music/SFX, and on some
+    # sequences (debut) the voice line; the rest of the voice is started by game code
+    audio = []
+    for t in tracks:
+        if t["type"] == "StoryCriwareTrack" and not t["muted"]:
+            for c in t["clips"]:
+                body = _read(c["node"]) if c["node"] else ""
+                sheet, cue = _field(body, "mCueSheet"), _field(body, "mCueName")
+                if sheet and cue:
+                    audio.append({"sheet": sheet, "cue": cue, "start": round(c["start"], 5),
+                                  "voice": _field(body, "mIsVoice") == "1" or sheet.startswith("vo_")})
     return {"sequence": os.path.splitext(os.path.basename(prefab))[0],
             "timeline": os.path.relpath(playable, proj.assets), "fps": FPS, "duration": round(duration, 5),
             "space": "Unity world: left-handed, Y up, metres; the timeline root (where the character stands) at the origin",
-            "lens": lens, "composer": composer.describe(), "camera_enabled": vcam_enabled,
-            "look_at": tf[look_tf]["name"] if look_tf else None,
-            "camera_rig": "/".join(tf[x]["name"] for x in chain(vcam_tf)),
+            **camera,
             "character_schedule": schedule, "facial": facial, "camera_cuts": cuts, "animated_props": props,
-            "frames": frames}
+            "audio_cues": audio, "frames": frames}
 
 
 
@@ -710,7 +734,35 @@ def export_characters(cid: str, job: dict, merged_dir: str, outputs: list[tuple[
 
 
 # ------------------------------------------------------------------ facial, lips, audio
-VOICE_CUE = {"debut": "greet", "touch1": "talk1", "touch2": "talk2", "touch3": "talk3"}
+def voice_cue(skin: str, data: dict, lang: str | None) -> tuple[str, str, float] | None:
+    """The sequence's voice line: (sheet, cue, start s). The timeline's own voice cue when it
+    has one (debut: greet); otherwise the line the game starts with it, paired by name -
+    touchN -> talkN, debut[N] -> greet[N], interact_* / wedding_touch_10N -> <same>_01 when
+    that is the only variant (lengths match the sequences)."""
+    for a in data.get("audio_cues", []):
+        if a["voice"] and a["sheet"].startswith("vo_"):
+            return a["sheet"], a["cue"], a["start"]
+    sys.path.insert(0, HERE)
+    import extract_voice
+    sheet = f"vo_sys_{skin}"
+    known = set(extract_voice.lips(sheet, lang or "zh"))
+    seq = data["sequence"]
+    m = re.fullmatch(r"touch(\d+)", seq)
+    names = [f"talk{m.group(1)}"] if m else []
+    m = re.fullmatch(r"debut(\d*)", seq)
+    if m:
+        names = [f"greet{m.group(1)}", "greet"] if m.group(1) else ["greet", "greet1"]
+    if seq.startswith(("interact_", "wedding_touch_")):
+        variants = sorted(k for k in known if k.startswith(f"v_s_{skin}_{seq}_"))
+        plain = f"v_s_{skin}_{seq}_01"
+        if plain in variants and all(v.startswith(plain) for v in variants):
+            variants = [plain]                # _01 beside alternate takes of it (_01_管理员)
+        # several different lines (wedding_touch_105: _01.._04) are placed by game code: no guess
+        names = [variants[0][len(f"v_s_{skin}_"):]] if len(variants) == 1 else []
+    for n in names:
+        if f"v_s_{skin}_{n}" in known:
+            return sheet, f"v_s_{skin}_{n}", 0.0
+    return None
 LIP_SHAPES = ("Mouth_a", "Mouth_i", "Mouth_u", "Mouth_e", "Mouth_o")   # CriLipsExPlayer A I U E O (I unused)
 
 
@@ -772,8 +824,9 @@ def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
                     else:
                         continue
                     vals[i] = clip.value(bi, min(max(lt, 0.0), clip.stop - clip.start))[0] / 100.0
-    cue = VOICE_CUE.get(data["sequence"])
-    lip = extract_voice.lips(f"vo_sys_{skin}", lang).get(f"v_s_{skin}_{cue}") if lang and cue else None
+    vc = voice_cue(skin, data, lang) if lang else None
+    lip = extract_voice.lips(vc[0], lang).get(vc[1]) if vc else None
+    lip_start = vc[2] if vc else 0.0
     if lip:
         # CriLipsExPlayer.LateUpdate: lip frame = playback ms / 33 (not 30 fps), weight = raw/10
         # on the mouth's A/I/U/E/O channels - but I is -1 (the constructor default, and the
@@ -785,10 +838,11 @@ def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
                 continue
             vals = chans.setdefault((mouth, zlib.crc32(shape.encode())), [0.0] * n)
             for i in range(n):
-                j = int(i * 1000 / FPS / 33)
-                if j < len(aiueo):
+                ms = (i / FPS - lip_start) * 1000
+                j = int(ms / 33)
+                if ms >= 0 and j < len(aiueo):
                     vals[i] = aiueo[j][k]
-    spec = {"fps": FPS, "frames": n, "lips": f"v_s_{skin}_{cue} ({lang})" if lip else None,
+    spec = {"fps": FPS, "frames": n, "lips": f"{vc[1]} @{lip_start:g}s ({lang})" if lip else None,
             "note": "mesh / shape are CRC32 of the SkinnedMeshRenderer path and the blend-shape "
                     "channel name (e.g. CRC32('Mouth'), CRC32('Mouth_a')); values 0..1",
             "channels": [{"mesh": m, "shape": s, "values": [round(v, 4) for v in vals]}
@@ -797,32 +851,34 @@ def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
     return len(chans)
 
 
-def mix_wavs(paths: list[str], out: str) -> float:
-    """Sum WAVs (all starting at t=0) into one 16-bit stereo WAV at the highest rate,
+def mix_wavs(paths: list, out: str) -> float:
+    """Sum WAVs - paths, or (path, start seconds) - into one 16-bit stereo WAV at the highest rate,
     resampling the others (polyphase); scaled down only if the sum would clip.
     Returns the peak before scaling."""
     import wave
     from fractions import Fraction
     import numpy as np
     tracks = []
-    for f in paths:
+    for item in paths:
+        f, start = (item, 0.0) if isinstance(item, str) else item
         w = wave.open(f)
         a = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").reshape(-1, w.getnchannels())
         a = a.astype(np.float64) / 32768
         if a.shape[1] == 1:
             a = np.repeat(a, 2, axis=1)
-        tracks.append((a[:, :2], w.getframerate()))
-    rate = max(r for _, r in tracks)
+        tracks.append((a[:, :2], w.getframerate(), start))
+    rate = max(r for _, r, _ in tracks)
     mixed = []
-    for a, r in tracks:
+    for a, r, start in tracks:
         if r != rate:
             from scipy.signal import resample_poly
             q = Fraction(rate, r)
             a = resample_poly(a, q.numerator, q.denominator, axis=0)
-        mixed.append(a)
-    m = np.zeros((max(len(a) for a in mixed), 2))
-    for a in mixed:
-        m[:len(a)] += a
+        pad = int(round(start * rate))
+        mixed.append((a, pad))
+    m = np.zeros((max(len(a) + pad for a, pad in mixed), 2))
+    for a, pad in mixed:
+        m[pad:pad + len(a)] += a
     peak = float(np.abs(m).max()) if len(m) else 0.0
     gain = min(1.0, 0.98 / peak) if peak else 1.0
     w = wave.open(out, "wb")
@@ -834,25 +890,36 @@ def mix_wavs(paths: list[str], out: str) -> float:
     return peak
 
 
-def export_audio(skin: str, seq: str, out_dir: str, stem: str, lang: str) -> str | None:
-    """One WAV per sequence (reze-engine plays a single audio track): the voice cue in
-    `lang` mixed with the scene music/SFX, both from t=0."""
+def export_audio(skin: str, data: dict, out_dir: str, stem: str, lang: str) -> str | None:
+    """One WAV per sequence (reze-engine plays a single audio track): every cue the timeline
+    starts (scene music/SFX, a voice line) plus the voice line the game starts with it,
+    mixed at their start times."""
     sys.path.insert(0, HERE)
     import extract_voice
-    parts = []
-    cue = VOICE_CUE.get(seq)
-    if cue:
-        v = extract_voice.decode(f"vo_sys_{skin}", lang).get(f"v_s_{skin}_{cue}")
-        if v:
-            parts.append(v)
-    scene = extract_voice.decode(f"ui_scene_{skin}", None).get(f"ui_scene_{skin}_{seq}")
-    if scene:
-        parts.append(scene)
+    parts, labels = [], []
+    for a in data.get("audio_cues", []):
+        if a["voice"]:
+            continue
+        w = extract_voice.decode(a["sheet"], None).get(a["cue"])
+        if w:
+            parts.append((w, a["start"]))
+            labels.append(a["cue"])
+    if not data.get("audio_cues"):
+        w = extract_voice.decode(f"ui_scene_{skin}", None).get(f"ui_scene_{skin}_{data['sequence']}")
+        if w:
+            parts.append((w, 0.0))
+            labels.append(os.path.basename(w)[:-4])
+    vc = voice_cue(skin, data, lang)
+    if vc:
+        w = extract_voice.decode(vc[0], lang).get(vc[1])
+        if w:
+            parts.append((w, vc[2]))
+            labels.append(f"{vc[1]} [{lang}]")
     if not parts:
         return None
     out = os.path.join(out_dir, f"{stem}.wav")
     mix_wavs(parts, out)
-    return ("voice + scene" if len(parts) == 2 else "scene" if scene else "voice") + f" -> {os.path.basename(out)}"
+    return " + ".join(labels) + f" -> {os.path.basename(out)}"
 
 
 # ------------------------------------------------------------------ camera FBX (Blender)
@@ -1016,6 +1083,8 @@ def main() -> int:
                 if not data:
                     continue
                 name = "win" if kind == "win" else data["sequence"]
+                if name.startswith(f"{skin}ui_"):          # 109503ui_wedding_touch_101 -> wedding_touch_101
+                    name = name[len(skin) + 3:]
                 if only and name not in only:
                     continue
                 data["sequence"] = name
@@ -1035,7 +1104,7 @@ def main() -> int:
                 if sched and all(s["anim"] and os.path.isfile(s["anim"]) for s in sched):
                     write_merged_clip(os.path.join(merged_dir, f"{stem}.anim"), stem, sched, data["duration"])
                 if kind == "dlc" and not args.no_fbx:
-                    audio = export_audio(skin, name, out_dir, stem, langs[0])
+                    audio = export_audio(skin, data, out_dir, stem, langs[0])
                     if audio:
                         print(f"   audio: {audio}")
                 done.append((stem, js))
