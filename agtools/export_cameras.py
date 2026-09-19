@@ -604,9 +604,12 @@ def _dot4(a, b):
 def _sequence_data(proj: Project, prefab: str, playable: str, tracks: list[dict], duration: float,
                    frames: list[dict], camera: dict) -> dict:
     """Everything but the camera: character clip schedule, facial clips, audio cues, cuts."""
+    # the character's own track ("@103401ui/103401ui_tpose"); other "<name>_tpose" tracks
+    # animate props (103401 touch2: "chazi_tpose" the fork, "arm_tpose" the hand feeding her)
+    is_char = lambda name: "tpose" in name and not re.search(r"(^|/)[A-Za-z]+_tpose$", name)
     schedule = []
     for t in tracks:
-        if t["muted"] or "tpose" not in t["name"] or t["name"].count("/") > 1:
+        if t["muted"] or not is_char(t["name"]) or t["name"].count("/") > 1:
             continue
         if t["type"] not in ("AnimationTrack", "ManualAnimatorTrack"):
             continue
@@ -621,7 +624,7 @@ def _sequence_data(proj: Project, prefab: str, playable: str, tracks: list[dict]
     # facial: "tpose" tracks whose clips drive blend shapes (SkinnedMeshRenderer, typeID 137)
     facial = []
     for t in tracks:
-        if t["muted"] or "tpose" not in t["name"] or t["name"].count("/") > 1                 or t["type"] not in ("AnimationTrack", "ManualAnimatorTrack"):
+        if t["muted"] or not is_char(t["name"]) or t["name"].count("/") > 1                 or t["type"] not in ("AnimationTrack", "ManualAnimatorTrack"):
             continue
         entries = [dict(c, anim=c["anim"] or node_clip(proj, c["node"])) for c in t["clips"]]
         entries = [c for c in entries if c["anim"]]
@@ -646,7 +649,8 @@ def _sequence_data(proj: Project, prefab: str, playable: str, tracks: list[dict]
                              "blend_style": int(_field(body, "m_Style") or 0),
                              "blend_time": float(_field(body, "m_Time") or 0)})
     props = sorted({t["name"].split("/")[-1] for t in tracks
-                    if not t["muted"] and t["name"].count("/") > 1 and t["type"].endswith("AnimationTrack")})
+                    if not t["muted"] and t["type"].endswith("AnimationTrack") and t["clips"]
+                    and (t["name"].count("/") > 1 or ("tpose" in t["name"] and not is_char(t["name"])))})
     # audio the timeline itself starts (StoryCriwareTrack): the scene music/SFX, and on some
     # sequences (debut) the voice line; the rest of the voice is started by game code
     audio = []
