@@ -220,9 +220,39 @@ character and writes a contact sheet — read the names off it, save as `names.j
 | `ag.py scenes [--grep X]` | stage index: 544 codes across `comscene`, `comsceneq`, `comeffect`, `levels` (`--index` rebuilds, ~5 min) |
 | `ag.py stages [--char 1095]` | DLC skin → stage table + pictures → `AG_stage_names/` (`contact_sheet.html`) |
 | `ag.py stage x343` | one stage → standalone Unity project → `AG_stages/x343/` (`comeffect/x100` picks the folder; `sourcespace` = all 7 modifier-mode spaces in one project, a scene each) |
+| `ag.py pmx x343` | that project → the PMX folder reze.design loads → `AG_pmx/x343-stage/` |
 | `ag.py cams 109501 104701` | a skin's authored camera sequences (victory pose + every DLC home-screen interaction) -> `AG_fbx_anim/<cid>/cameras/<skin>@<seq>.camera.fbx` + `.character.fbx` + `.camera.json` + previews - see "Camera sequences" |
 | `agtools/stage_thumbs.py --prefix x` | render each stage (glb → Blender) → `AG_stage_names/render/` |
 | `agtools/bundle_deps.py <bundle>` | a bundle's full dependency closure (`--index` rebuilds the CAB map, ~8 min) |
+
+### To a model (`ag.py pmx`)
+
+`ag.py stage` makes a Unity project that renders like the game; `ag.py pmx` makes
+a model anything can open. It reads the exported project directly — no Blender,
+no FBX, because every hop through another format renames a material, and the
+material **name** is what a person assigns a look to on the other side.
+
+```
+AG_pmx/x343-stage/
+  X343.pmx      geometry at MMD scale, one material per Unity material
+  tex/          the albedo each material samples
+  maps/         its relief map, named `<albedo>_N.png` so the pairing needs no sidecar
+  X343.hdr      the scene's ambient gradient with the reflection probe as structure
+```
+
+Upload that folder to reze.design as a stage. The lighting rig is deliberately
+left behind — a game's sun, ambient and lamps were authored for its own renderer
+and its own subject, and X305's four lamps stand *inside a piano* and reach 0.7 m.
+What a stage does carry, it carries in the PMX itself: two-sidedness and the
+shadow bits from `_Cull`, a plant's vertical tint folded into its material colour,
+metal/roughness/AO packed into the spare `specular` field, normal strength in
+`shininess`, and **the source shader in each material's memo** — which is how a
+pane of glass named `Terrain_X333_005` still gets the glass look.
+
+The converter is vendored at `tools/unity-stage/` (reze-design's own file) and
+runs on its own with `--project/--scale/--out/--name`; its README covers the traps
+— static batching, the packed `dimension` byte, and why the scale is 8 rather
+than 12.5.
 
 - **Dependencies.** Bundles name each other only by internal `CAB-<hash>` file name.
   `bundle_deps.py` maps those to files by reading each bundle's UnityFS directory

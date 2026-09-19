@@ -9,6 +9,7 @@
 /tools/*
 !/tools/re/
 !/tools/reze-rig/
+!/tools/unity-stage/
 !/tools/uscsandbox-aethergazer.patch
 !/tools/uscs_builtin_names.py
 !/tools/dxbc_disasm.py
