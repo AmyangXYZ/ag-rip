@@ -343,6 +343,10 @@ root) playing excerpts of its clips, camera-cut blends and props.
   vgmstream (`tools/vgmstream`, which knows the game's HCA key): voice from
   `Voice/<lang>/` (zh installed; ja needs the game's Japanese voice pack downloaded first),
   scene music/SFX from `ui_scene_<skin>.acb`. `agtools/cri_utf.py` reads @UTF tables.
+- Shot changes authored as a sub-0.1 s whip (a few keys flinging the camera across the set,
+  or a stray key at an old shot's spot - 104701 debut) are exported as clean cuts: the
+  outgoing shot holds, then one jump (`held_frames` in the JSON). At 30 fps they were one or
+  two frames of unrelated views.
 - Not included: the 1.5 s blend from/to the game's home camera at the start/end (the
   home camera is placed by game code; the cut times are in the JSON).
 

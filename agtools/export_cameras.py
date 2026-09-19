@@ -551,10 +551,54 @@ def sequence(proj: Project, prefab: str) -> dict | None:
                        "fov": round(fov, 4), "dutch": round(dutch, 4),
                        "look_at": [round(c, 6) for c in target] if target else None})
 
+    held = hard_cuts(frames)
     return _sequence_data(proj, prefab, playable, tracks, duration, frames, {
+        "held_frames": held,
         "lens": lens, "composer": composer.describe(), "camera_enabled": vcam_enabled,
         "look_at": tf[look_tf]["name"] if look_tf else None,
         "camera_rig": "/".join(tf[x]["name"] for x in chain(vcam_tf))})
+
+
+CUT_MOVE = 0.25            # m per frame: a step this long (or 15x the shot's median) is a cut
+CUT_TURN = 20.0            # degrees per frame, likewise
+CUT_BLUR = 3               # a jump run this short (<= 0.1 s) is one cut, not a camera move
+
+
+def hard_cuts(frames: list[dict]) -> list[int]:
+    """Collapse sub-0.1 s camera whips into clean cuts; returns the frames held.
+
+    Some shot changes are authored as a few keys that fling the camera across the set
+    (104701 debut 3.40-3.50 s: down, back, sideways, one axis per key) or leave a stray
+    key at an old shot's spot (7.30 s). At 30 fps they are one or two frames of unrelated
+    views - flashes. A run of <= CUT_BLUR consecutive cut-sized steps holds the outgoing
+    shot and jumps once, on the frame the new shot starts. Longer runs are real moves
+    (104701 touch2's 0.17 s push-in) and are kept."""
+    pos = [f.get("position") for f in frames]
+    if len(frames) < 3 or any(p is None for p in pos):
+        return []
+    steps = [math.dist(a, b) for a, b in zip(pos, pos[1:])]
+    turns = [math.degrees(2 * math.acos(min(1.0, abs(_dot4(a["rotation"], b["rotation"])))))
+             for a, b in zip(frames, frames[1:])]
+    move = max(CUT_MOVE, 15 * sorted(steps)[len(steps) // 2])
+    fast = [s > move or r > CUT_TURN for s, r in zip(steps, turns)]
+    held, i = [], 0
+    while i < len(fast):
+        if not fast[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(fast) and fast[j]:
+            j += 1
+        if 1 < j - i <= CUT_BLUR:                    # frames i+1 .. j-1 are the whip
+            for k in range(i + 1, j):
+                frames[k] = {**frames[i], "t": frames[k]["t"]}
+                held.append(k)
+        i = j
+    return held
+
+
+def _dot4(a, b):
+    return sum(x * y for x, y in zip(a, b))
 
 
 def _sequence_data(proj: Project, prefab: str, playable: str, tracks: list[dict], duration: float,
