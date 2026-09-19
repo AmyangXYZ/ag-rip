@@ -872,9 +872,12 @@ def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
     lip = extract_voice.lips(vc[0], lang).get(vc[1]) if vc else None
     lip_start = vc[2] if vc else 0.0
     if lip:
-        # CriLipsExPlayer.LateUpdate: lip frame = playback ms / 33 (not 30 fps), weight = raw/10
-        # on the mouth's A/I/U/E/O channels - but I is -1 (the constructor default, and the
-        # field is not serialized), so the game never applies the "i" vowel: only a/u/e/o.
+        # CriLipsExPlayer.LateUpdate sets weight = raw/10 on the mouth's A/I/U/E/O channels -
+        # but I is -1 (the constructor default, and the field is not serialized), so the game
+        # never applies the "i" vowel: only a/u/e/o. The data is 30 fps (length_ms / frames
+        # = 33.3); the game indexes it by playback ms / 33, which runs the mouth 1% fast -
+        # 0.15-0.2 s ahead of the voice by the end of a 30 s line, closing before the words
+        # do. Sampled at the true 30 fps it tracks the voice from start to end.
         mouth = zlib.crc32(b"Mouth")
         aiueo = lip["aiueo"]
         for k, shape in enumerate(LIP_SHAPES):
@@ -883,7 +886,7 @@ def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
             vals = chans.setdefault((mouth, zlib.crc32(shape.encode())), [0.0] * n)
             for i in range(n):
                 ms = (i / FPS - lip_start) * 1000
-                j = int(ms / 33)
+                j = int(ms * lip["fps"] / 1000 + 1e-6)
                 if ms >= 0 and j < len(aiueo):
                     vals[i] = aiueo[j][k]
     spec = {"fps": FPS, "frames": n, "lips": f"{vc[1]} @{lip_start:g}s ({lang})" if lip else None,

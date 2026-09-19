@@ -13,9 +13,10 @@ Audio is HCA with the game's key (Aether Gazer, in vgmstream's key list - tools/
 Lip sync: CriLipsExPlayer plays per-cue mouth data pre-analysed by CRI LipSync, shipped
 per language in crilipsexdata/<lang>.ys (TextAsset <sheet>.bytes):
     int32 cues; per cue: int32 len, name, int32 length_ms, int32 frames,
-    frames x (uint16 index, A, I, U, E, O)          one frame per 33 ms, weights 0..1000
+    frames x (uint16 index, A, I, U, E, O)          30 fps (length_ms / frames = 33.3), 0..1000
 CriLipsExPlayer (decompiled) shows frame (playback ms / 33) with weight raw/10 on the
 mouth's A/U/E/O blend shapes (Mouth_a/u/e/o); its I index is -1, so "i" is never shown.
+The /33 drifts 1% ahead of the voice; exports sample the data at its true 30 fps.
 """
 from __future__ import annotations
 
