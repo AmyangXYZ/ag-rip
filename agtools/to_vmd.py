@@ -8,7 +8,7 @@ For each <skin>@<seq> in AG_fbx_anim/<cid>/cameras/ (written by `ag.py cams`):
   <seq>.character.fbx -> <seq>.character.vmd   body retargeted onto the target model,
                                                facial / lip morphs as MMD morphs
   <seq>.camera.fbx    -> <seq>.camera.vmd      the sequence's camera, sized by the character
-  <seq>.wav           copied beside them        voice + scene music, one track
+  <seq>.wav           -> <seq>.mixed.zh.wav     voice + scene music, one track
 into AG_dlc_scene/<skin>/ (e.g. AG_dlc_scene/109501/). Everything starts at frame 0.
 
 The converter is reze-rig's scripts/fbx2vmd.ts (https://github.com/AmyangXYZ/reze-rig,
@@ -64,7 +64,7 @@ def main() -> int:
                 continue
             wav = os.path.join(src, f"{stem}.wav")
             if os.path.isfile(wav):
-                shutil.copyfile(wav, os.path.join(out, f"{stem}.wav"))
+                shutil.copyfile(wav, os.path.join(out, f"{stem}.mixed.zh.wav"))
             print(f"{stem} -> {out}")
     return 0
 
