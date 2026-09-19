@@ -827,6 +827,9 @@ def ui_rig(skin: str, cid: str) -> tuple[str | None, str | None]:
     return fbx, rig_prefab(skin, cid, True)
 
 
+LIP_LEAD = 1000 * 2 / FPS           # ms: two frames, the measured CRI lip-data latency
+
+
 def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
     """Per-frame morph values (0..1) for a sequence: the facial clips (decoded from the
     bundle - AssetRipper's YAML merges the unnamed blend-shape curves) placed on the
@@ -877,7 +880,10 @@ def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
         # never applies the "i" vowel: only a/u/e/o. The data is 30 fps (length_ms / frames
         # = 33.3); the game indexes it by playback ms / 33, which runs the mouth 1% fast -
         # 0.15-0.2 s ahead of the voice by the end of a 30 s line, closing before the words
-        # do. Sampled at the true 30 fps it tracks the voice from start to end.
+        # do. Sampled at the true 30 fps it tracks the voice from start to end - but trails
+        # it: phrase by phrase the mouth opens 30-60 ms after the sound and shuts 50-100 ms
+        # after it (the analysis window's latency; the game's /33 drift half-hides it). The
+        # lips lead by LIP_LEAD so the mouth moves with the sound, not after it.
         mouth = zlib.crc32(b"Mouth")
         aiueo = lip["aiueo"]
         for k, shape in enumerate(LIP_SHAPES):
@@ -885,7 +891,7 @@ def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
                 continue
             vals = chans.setdefault((mouth, zlib.crc32(shape.encode())), [0.0] * n)
             for i in range(n):
-                ms = (i / FPS - lip_start) * 1000
+                ms = (i / FPS - lip_start) * 1000 + LIP_LEAD
                 j = int(ms * lip["fps"] / 1000 + 1e-6)
                 if ms >= 0 and j < len(aiueo):
                     vals[i] = aiueo[j][k]
