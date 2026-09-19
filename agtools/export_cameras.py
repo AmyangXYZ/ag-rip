@@ -34,11 +34,12 @@ Output, AG_fbx_anim/<cid>/cameras/<skin>@<sequence>.*:
                    matches the per-clip exports (rest key, facing; frame 0 = timeline 0)
   DLC interactions additionally (built on the home-screen model <skin>ui_tpose, whose
   Eye / Eyebrow / Mouth / Pupil meshes carry the morphs):
-  .character.fbx / .character.ja.fbx   + morph animation (standard FBX blend-shape channel
-                   curves, real channel names): the facial clips decoded from the bundle
-                   (unity_clip.py) + the game's pre-analysed lip sync (zh / ja) on Mouth_a..o
-  .morphs.<lang>.json   the same morph curves as data (CRC32 mesh / channel keys, 0..1)
-  .voice.<lang>.wav     the voice cue (debut: greet, touchN: talkN), .scene.wav the music/SFX
+  .character.fbx   + morph animation (standard FBX blend-shape channel curves, real
+                   channel names): the facial clips decoded from the bundle (unity_clip.py)
+                   + the game's pre-analysed lip sync (zh; --lang zh,ja adds .character.ja.fbx)
+  .morphs.zh.json  the same morph curves as data (CRC32 mesh / channel keys, 0..1)
+  .wav             one audio track (reze-engine has one slot): the voice cue (debut: greet,
+                   touchN: talkN) mixed with the scene music/SFX, from t=0
   _preview/        Workbench frames through the camera (checking)
 Run with system Python; the FBX step re-launches itself inside Blender.
 """
@@ -623,24 +624,62 @@ def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
     return len(chans)
 
 
-def export_audio(skin: str, seq: str, out_dir: str, stem: str, langs: list[str]) -> list[str]:
-    """The sequence's voice (per language) and scene music/SFX, as WAVs starting at t=0."""
+def mix_wavs(paths: list[str], out: str) -> float:
+    """Sum WAVs (all starting at t=0) into one 16-bit stereo WAV at the highest rate,
+    resampling the others (polyphase); scaled down only if the sum would clip.
+    Returns the peak before scaling."""
+    import wave
+    from fractions import Fraction
+    import numpy as np
+    tracks = []
+    for f in paths:
+        w = wave.open(f)
+        a = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").reshape(-1, w.getnchannels())
+        a = a.astype(np.float64) / 32768
+        if a.shape[1] == 1:
+            a = np.repeat(a, 2, axis=1)
+        tracks.append((a[:, :2], w.getframerate()))
+    rate = max(r for _, r in tracks)
+    mixed = []
+    for a, r in tracks:
+        if r != rate:
+            from scipy.signal import resample_poly
+            q = Fraction(rate, r)
+            a = resample_poly(a, q.numerator, q.denominator, axis=0)
+        mixed.append(a)
+    m = np.zeros((max(len(a) for a in mixed), 2))
+    for a in mixed:
+        m[:len(a)] += a
+    peak = float(np.abs(m).max()) if len(m) else 0.0
+    gain = min(1.0, 0.98 / peak) if peak else 1.0
+    w = wave.open(out, "wb")
+    w.setnchannels(2)
+    w.setsampwidth(2)
+    w.setframerate(rate)
+    w.writeframes((m * gain * 32767).round().astype("<i2").tobytes())
+    w.close()
+    return peak
+
+
+def export_audio(skin: str, seq: str, out_dir: str, stem: str, lang: str) -> str | None:
+    """One WAV per sequence (reze-engine plays a single audio track): the voice cue in
+    `lang` mixed with the scene music/SFX, both from t=0."""
     sys.path.insert(0, HERE)
     import extract_voice
-    made = []
+    parts = []
     cue = VOICE_CUE.get(seq)
-    for lang in langs:
-        if cue:
-            wavs = extract_voice.decode(f"vo_sys_{skin}", lang)
-            w = wavs.get(f"v_s_{skin}_{cue}")
-            if w:
-                shutil.copyfile(w, os.path.join(out_dir, f"{stem}.voice.{lang}.wav"))
-                made.append(f"voice.{lang}")
+    if cue:
+        v = extract_voice.decode(f"vo_sys_{skin}", lang).get(f"v_s_{skin}_{cue}")
+        if v:
+            parts.append(v)
     scene = extract_voice.decode(f"ui_scene_{skin}", None).get(f"ui_scene_{skin}_{seq}")
     if scene:
-        shutil.copyfile(scene, os.path.join(out_dir, f"{stem}.scene.wav"))
-        made.append("scene")
-    return made
+        parts.append(scene)
+    if not parts:
+        return None
+    out = os.path.join(out_dir, f"{stem}.wav")
+    mix_wavs(parts, out)
+    return ("voice + scene" if len(parts) == 2 else "scene" if scene else "voice") + f" -> {os.path.basename(out)}"
 
 
 # ------------------------------------------------------------------ camera FBX (Blender)
@@ -773,7 +812,8 @@ def main() -> int:
     ap.add_argument("skins", nargs="+", help="skin ids, e.g. 109501 104701")
     ap.add_argument("--only", help="comma list of sequences (win, debut, touch1, ...)")
     ap.add_argument("--no-fbx", action="store_true", help="JSON only")
-    ap.add_argument("--lang", default="zh,ja", help="voice / lip-sync languages (first = default character.fbx)")
+    ap.add_argument("--lang", default="zh", help="voice / lip-sync languages, comma list; the first is "
+                    "character.fbx and the audio, others add character.<lang>.fbx (e.g. zh,ja)")
     args = ap.parse_args()
     only = set(args.only.split(",")) if args.only else None
     os.makedirs(CACHE, exist_ok=True)
@@ -822,9 +862,9 @@ def main() -> int:
                 if sched and all(s["anim"] and os.path.isfile(s["anim"]) for s in sched):
                     write_merged_clip(os.path.join(merged_dir, f"{stem}.anim"), stem, sched, data["duration"])
                 if kind == "dlc" and not args.no_fbx:
-                    audio = export_audio(skin, name, out_dir, stem, langs)
+                    audio = export_audio(skin, name, out_dir, stem, langs[0])
                     if audio:
-                        print(f"   audio: {', '.join(audio)}")
+                        print(f"   audio: {audio}")
                 done.append((stem, js))
             if args.no_fbx or not done:
                 continue

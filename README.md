@@ -322,6 +322,9 @@ root) playing excerpts of its clips, camera-cut blends and props.
   rest joints (residual ~1e-8), written with `export_anim_fbx`'s FBX settings, keyed on
   the same frames. `.camera.json` holds the per-frame pose in Unity space for engines.
 - Previews are rendered from the final FBXs re-imported fresh (what a consumer sees).
+- **To VMD** (reze-rig, not this repo): `node fbx2vmd.mjs <seq>.character.fbx <seq>.camera.fbx
+  --target-pmx <model.pmx> --bind-ref <reze-rig>/public/fbx/Idle.fbx --out AG_vmd/<cid>/cameras`
+  writes the motion + morph VMD and the camera VMD; copy the `.wav` beside them.
 - **Facial + lips + voice** (DLC interactions): the sequences play on the home-screen
   model (`<skin>ui_tpose`: Eye / Eyebrow / Mouth / Pupil meshes with named blend shapes).
   Facial curves come from the timeline's facial track (109501: `FacialAni*` clips; 104701:
@@ -330,8 +333,9 @@ root) playing excerpts of its clips, camera-cut blends and props.
   CRC32(renderer path) / CRC32(channel name). Lip sync is the game's own pre-analysed data
   (`crilipsexdata/<lang>.ys`, per voice cue, 30 fps A/I/U/E/O -> `Mouth_a..o`, overriding
   the facial mouth while the voice plays, as `CriLipsExPlayer` does). Written into the
-  character FBX as standard blend-shape channel animation; `.character.fbx` has zh lips,
-  `.character.ja.fbx` ja lips. `ag.py voice` decodes CRI ACB/AWB banks to WAV with
+  character FBX as standard blend-shape channel animation (zh lips; `--lang zh,ja` adds
+  `.character.ja.fbx`). Audio is one track per sequence, `<skin>@<seq>.wav`: the voice cue
+  mixed with the scene music/SFX (reze-engine plays a single audio track). `ag.py voice` decodes CRI ACB/AWB banks to WAV with
   vgmstream (`tools/vgmstream`, which knows the game's HCA key): voice from
   `Voice/<lang>/` (zh installed; ja needs the game's Japanese voice pack downloaded first),
   scene music/SFX from `ui_scene_<skin>.acb`. `agtools/cri_utf.py` reads @UTF tables.
