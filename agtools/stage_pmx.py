@@ -4,10 +4,16 @@ r"""An exported stage -> the PMX folder reze.design loads.
     python ag.py pmx x333                   -> AG_pmx/x333-stage/X333.pmx + tex/ + maps/ + X333.hdr
     python ag.py pmx x305 x323 x333         several
     python ag.py pmx x333 --scale 12.5      a project whose unit is a metre
+    python ag.py pmx x333 --albedo 1024     cap the textures, for a stage too heavy to ship
 
 The second half of `ag.py stage`: that one turns a stage into a Unity project
 that renders like the game, this one turns the project into a model. Run it
 after the stage command has finished, on the same code.
+
+Textures come out at the game's own resolution — a 2048 albedo stays 2048, and
+normal maps with it. The .hdr is the scene's ambient gradient with its reflection
+probe ridden on top as structure, and it installs itself onto the World slot when
+the stage loads, so the room's fill and its reflections arrive with the geometry.
 
 The converter itself is vendored under tools/unity-stage/ (reze-design's own,
 same file) and is runnable on its own with --project/--scene/--out/--name.

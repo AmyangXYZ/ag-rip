@@ -235,12 +235,20 @@ material **name** is what a person assigns a look to on the other side.
 ```
 AG_pmx/x343-stage/
   X343.pmx      geometry at MMD scale, one material per Unity material
-  tex/          the albedo each material samples
+  tex/          the albedo each material samples, at the game's own resolution
   maps/         its relief map, named `<albedo>_N.png` so the pairing needs no sidecar
   X343.hdr      the scene's ambient gradient with the reflection probe as structure
 ```
 
-Upload that folder to reze.design as a stage. The lighting rig is deliberately
+Upload that folder to reze.design as a stage. **Textures are copied, not
+resized** — a 2048 albedo arrives as a 2048 albedo, normal maps too. Downscaling
+was the default for a while and it cost the thing the conversion is for: the
+frame this came out of is sharp, and a stage that is nearly it reads as a worse
+stage rather than a cheaper one. `--albedo N` / `--normal N` cap the longest edge
+when a stage really is too heavy. The `.hdr` installs itself onto the World
+(HDRI) slot on load, filled or not — a stage is a place and the light in it
+belongs to it — and water reflects it, so without it the ripples have nothing to
+mirror. The lighting rig is deliberately
 left behind — a game's sun, ambient and lamps were authored for its own renderer
 and its own subject, and X305's four lamps stand *inside a piano* and reach 0.7 m.
 What a stage does carry, it carries in the PMX itself: two-sidedness and the
