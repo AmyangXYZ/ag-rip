@@ -8,7 +8,7 @@ its exports into VMD on its own, with nothing but Node.js.
 | | |
 | --- | --- |
 | Source | https://github.com/AmyangXYZ/reze-rig, `scripts/fbx2vmd.ts` + `lib/` |
-| Commit | `d3ed8332c9fc0243017f01524e4c5a6783cd62ef` ("Hold one whole-degree fov per shot, so a zoom doesn't jitter") |
+| Commit | `c35cbe52c72a37da4fdc4a729ab8ca203e884609` ("Accept --no-foot-ik, as the README and the comment already say") |
 | Bundled with it | `reze-engine` 0.55.2 (VMD writer, PMX loader) |
 | License | MIT, © 2026 Amyang (`LICENSE`, copied from reze-rig) |
 
@@ -26,8 +26,11 @@ sequence in `AG_fbx_anim/<cid>/cameras/` (`.character.fbx` + `.camera.fbx`) into
 
 ```
 node tools/reze-rig/fbx2vmd.mjs <x>.character.fbx <x>.camera.fbx --out <dir> \
-     --target-pmx <model.pmx> --no-bind-ref
+     --target-pmx <model.pmx> --no-bind-ref --no-foot-ik
 ```
+
+`--no-foot-ik` (ag.py vmd's default): the legs by FK. With foot IK on, reze-rig lifts the
+body so no foot sinks below the floor, which cancels falls below floor level.
 
 `--no-bind-ref`: ag-rip's FBX already carry the true rest pose (a rest key written by
 `export_anim_fbx`), so anchoring to reze-rig's bundled `Idle.fbx` changes nothing - the

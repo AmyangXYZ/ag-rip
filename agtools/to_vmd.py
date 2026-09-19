@@ -4,8 +4,10 @@ r"""Camera sequences -> MMD VMD (motion + morphs, camera) with reze-rig's fbx2vm
     python ag.py vmd 109501 --target-pmx D:\reze-rig\public\models\托特\托特.pmx
     python ag.py vmd 109501 --only touch1,debut --target-pmx <model.pmx>
 
-For each <skin>@<seq> in AG_fbx_anim/<cid>/cameras/ (written by `ag.py cams`):
-  <seq>.character.fbx -> <seq>.character.vmd   body retargeted onto the target model,
+For each <skin>@<seq> in AG_fbx_anim/<cid>/cameras/ (written by `ag.py cams`; a sequence
+whose timeline camera is disabled - it stays on the home camera - has no .camera.*):
+  <seq>.character.fbx -> <seq>.character.vmd   body retargeted onto the target model (FK, no
+                                               foot IK - see --foot-ik; root motion kept),
                                                facial / lip morphs as MMD morphs
   <seq>.camera.fbx    -> <seq>.camera.vmd      the sequence's camera, sized by the character
   <seq>.wav           -> <seq>.mixed.zh.wav     voice + scene music, one track
@@ -36,6 +38,10 @@ def main() -> int:
     ap.add_argument("--target-pmx", required=True, help="the MMD model to retarget onto (its morphs name the VMD's)")
     ap.add_argument("--only", help="comma list of sequences (touch1, debut, win, ...)")
     ap.add_argument("--out", help="output folder (default AG_dlc_scene/<skin>)")
+    ap.add_argument("--foot-ik", action="store_true",
+                    help="export foot-IK targets (fbx2vmd's default). Off here: with IK on, reze-rig lifts "
+                         "the body so no foot sinks below the floor, which cancels falls below floor level "
+                         "(e.g. 104701 touch2's dive into the water)")
     args = ap.parse_args()
     if not os.path.isfile(FBX2VMD):
         sys.exit(f"error: {FBX2VMD} missing (see tools/reze-rig/README.md to rebuild it)")
@@ -47,15 +53,19 @@ def main() -> int:
         src = os.path.join(ROOT, "AG_fbx_anim", cid, "cameras")
         out = args.out or os.path.join(ROOT, "AG_dlc_scene", skin)
         os.makedirs(out, exist_ok=True)
-        for cam in sorted(glob.glob(os.path.join(src, f"{skin}@*.camera.fbx"))):
-            stem = os.path.basename(cam)[:-len(".camera.fbx")]
+        for char in sorted(glob.glob(os.path.join(src, f"{skin}@*.character.fbx"))):
+            stem = os.path.basename(char)[:-len(".character.fbx")]
             seq = stem.split("@", 1)[1]
             if only and seq not in only:
                 continue
-            char = os.path.join(src, f"{stem}.character.fbx")
+            cam = os.path.join(src, f"{stem}.camera.fbx")
             inputs = [p for p in (char, cam) if os.path.isfile(p)]
+            stale = os.path.join(out, f"{stem}.camera.vmd")
+            if not os.path.isfile(cam) and os.path.isfile(stale):
+                os.remove(stale)             # no camera of its own (disabled vcam: home camera)
             r = subprocess.run(["node", FBX2VMD, *inputs, "--out", out, "--target-pmx", args.target_pmx,
-                                "--no-bind-ref"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+                                "--no-bind-ref"] + ([] if args.foot_ik else ["--no-foot-ik"]),
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
             for line in r.stdout.splitlines():
                 if line.endswith(".vmd") or ".vmd  (" in line:
                     print("  " + line)

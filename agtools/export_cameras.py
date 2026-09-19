@@ -177,6 +177,155 @@ def roll(r, degrees):
     return [[sum(r[i][k] * rz[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
 
 
+# ------------------------------------------------------------------ Cinemachine composer
+# CinemachineComposer.MutateCameraState (Cinemachine 2.x), reproduced so damped aims come
+# out as the game shows them: the orientation carries over from the previous frame, a
+# damped pass pulls the target into the dead zone, an undamped pass keeps it inside the
+# soft zone ("hard" rect). With no damping and a zero dead zone it is an exact look-at.
+_UP = (0.0, 1.0, 0.0)
+ASPECT = 16 / 9
+SIM_HZ = 60                               # the game's update rate for the damped sim
+
+
+def _m(q):
+    return q_mat(q)
+
+
+def _mm(a, b):
+    return [[sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+
+
+def _mv(a, v):
+    return [sum(a[i][k] * v[k] for k in range(3)) for i in range(3)]
+
+
+def _tr(a):
+    return [[a[j][i] for j in range(3)] for i in range(3)]
+
+
+def _dot(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _axis_angle(deg, axis):
+    a = _norm(axis)
+    h = math.radians(deg) / 2
+    return q_mat((a[0] * math.sin(h), a[1] * math.sin(h), a[2] * math.sin(h), math.cos(h)))
+
+
+def _angle(a, b):
+    a, b = _norm(a), _norm(b)
+    d = [x - y for x, y in zip(a, b)]
+    s_ = [x + y for x, y in zip(a, b)]
+    return math.degrees(math.atan2(math.sqrt(_dot(d, d)), math.sqrt(_dot(s_, s_))) * 2)
+
+
+def _signed_angle(a, b, n):
+    c = _cross(_norm(a), _norm(b))
+    ang = _angle(a, b)
+    return -ang if _dot(c, n) < 0 else ang
+
+
+def _project_plane(v, n):
+    nn = _dot(n, n) or 1.0
+    k = _dot(v, n) / nn
+    return [v[i] - n[i] * k for i in range(3)]
+
+
+def _rot_to_target(orient, look_dir):
+    """UnityQuaternionExtensions.GetCameraRotationToTarget -> (pitch, yaw) degrees."""
+    if _dot(look_dir, look_dir) < 1e-10:
+        return [0.0, 0.0]
+    inv = _tr(orient)
+    up = _mv(inv, _UP)
+    d = _mv(inv, look_dir)
+    ang_h = 0.0
+    dh = _project_plane(d, up)
+    if _dot(dh, dh) > 1e-10:
+        ch = _project_plane([0.0, 0.0, 1.0], up)
+        if _dot(ch, ch) > 1e-10:
+            ang_h = _signed_angle(ch, dh, up)
+    q = _axis_angle(ang_h, up)
+    ang_v = _signed_angle(_mv(q, [0.0, 0.0, 1.0]), d, _mv(q, [1.0, 0.0, 0.0]))
+    return [ang_v, ang_h]
+
+
+def _apply_rot(orient, rot):
+    """UnityQuaternionExtensions.ApplyCameraRotation."""
+    return _mm(_mm(_axis_angle(rot[1], _UP), orient), _axis_angle(rot[0], [1.0, 0.0, 0.0]))
+
+
+def _damp(initial, damp_time, dt):
+    """Cinemachine Damper.Damp."""
+    if damp_time < 1e-4 or abs(initial) < 1e-4:
+        return initial
+    if dt < 1e-4:
+        return 0.0
+    k = 4.605170186 / damp_time
+    return initial * (1 - math.exp(-k * dt))
+
+
+class Composer:
+    def __init__(self, body: str | None) -> None:
+        f = lambda k, d: float(_field(body, k) or d) if body else d
+        self.offset = _vec(_field(body, "m_TrackedObjectOffset")) if body else (0.0, 0.0, 0.0)
+        self.screen = (f("m_ScreenX", 0.5), f("m_ScreenY", 0.5))
+        self.dead = (f("m_DeadZoneWidth", 0), f("m_DeadZoneHeight", 0))
+        self.soft = (f("m_SoftZoneWidth", 0.8), f("m_SoftZoneHeight", 0.8))
+        self.bias = (f("m_BiasX", 0), f("m_BiasY", 0))
+        self.damping = (f("m_HorizontalDamping", 0), f("m_VerticalDamping", 0))
+        self.center_on_activate = f("m_CenterOnActivate", 1) != 0
+        self.reset()
+
+    def describe(self) -> dict:
+        return {"tracked_object_offset": list(self.offset), "screen": list(self.screen),
+                "dead_zone": list(self.dead), "soft_zone": list(self.soft), "bias": list(self.bias),
+                "damping_h_v": list(self.damping), "center_on_activate": self.center_on_activate}
+
+    def reset(self) -> None:
+        self.prev = None                    # (camera pos, look-at point, orientation, screen offset)
+
+    def _bounds(self, rect, fov):
+        tv = math.tan(math.radians(fov) / 2)
+        th = tv * ASPECT
+        a = lambda ndc, t: math.degrees(math.atan(ndc * t))
+        (x0, y0, x1, y1) = rect
+        return (a(2 * y0 - 1, tv), a(2 * y1 - 1, tv), a(2 * x0 - 1, th), a(2 * x1 - 1, th))
+
+    def _to_bounds(self, orient, rect, point, pos, fov, dt):
+        rot = _rot_to_target(orient, [point[k] - pos[k] for k in range(3)])
+        ymin, ymax, xmin, xmax = self._bounds(rect, fov)
+        rot[0] = rot[0] - ymin if rot[0] < ymin else rot[0] - ymax if rot[0] > ymax else 0.0
+        rot[1] = rot[1] - xmin if rot[1] < xmin else rot[1] - xmax if rot[1] > xmax else 0.0
+        if dt >= 0 and self.prev is not None:
+            rot[0] = _damp(rot[0], self.damping[1], dt)
+            rot[1] = _damp(rot[1], self.damping[0], dt)
+        return _apply_rot(orient, rot)
+
+    def step(self, pos, raw_orient, point, fov, dt):
+        sx, sy = self.screen
+        dead = (sx - self.dead[0] / 2, sy - self.dead[1] / 2, sx + self.dead[0] / 2, sy + self.dead[1] / 2)
+        bx = self.bias[0] * (self.soft[0] - self.dead[0])
+        by = self.bias[1] * (self.soft[1] - self.dead[1])
+        hard = (sx - self.soft[0] / 2 + bx, sy - self.soft[1] / 2 + by, sx + self.soft[0] / 2 + bx, sy + self.soft[1] / 2 + by)
+        if self.prev is None:
+            orient = look_rotation(_mv(raw_orient, [0.0, 0.0, 1.0]), _UP)
+            rect = (sx, sy, sx, sy) if self.center_on_activate else dead
+            orient = self._to_bounds(orient, rect, point, pos, fov, -1)
+        else:
+            ppos, ppoint, porient, poff = self.prev
+            d = [ppoint[k] - ppos[k] for k in range(3)]
+            if _dot(d, d) < 1e-10:
+                orient = look_rotation(_mv(porient, [0.0, 0.0, 1.0]), _UP)
+            else:
+                orient = _apply_rot(look_rotation(d, _UP), [-poff[0], -poff[1]])
+            orient = self._to_bounds(orient, dead, point, pos, fov, dt)
+            orient = self._to_bounds(orient, hard, point, pos, fov, -1)
+        off = _rot_to_target(orient, [point[k] - pos[k] for k in range(3)])
+        self.prev = (pos, point, orient, off)
+        return orient
+
+
 # ------------------------------------------------------------------ one sequence
 class Project:
     def __init__(self, path: str) -> None:
@@ -291,13 +440,16 @@ def sequence(proj: Project, prefab: str) -> dict | None:
     look_tf = look_tf if look_tf in tf else None
     lens = {k: float(re.search(k + r": ([-\d.eE]+)", vcam[1]).group(1))
             for k in ("FieldOfView", "NearClipPlane", "FarClipPlane", "Dutch")}
-    composer = next((b for c, b in docs.values() if c == "114" and "m_TrackedObjectOffset" in b), None)
-    offset = _vec(_field(composer, "m_TrackedObjectOffset")) if composer else (0.0, 0.0, 0.0)
-    if composer:
-        damp = [float(_field(composer, k) or 0) for k in ("m_HorizontalDamping", "m_VerticalDamping")]
-        screen = [float(_field(composer, k) or 0.5) for k in ("m_ScreenX", "m_ScreenY")]
-    else:
-        damp, screen = [0, 0], [0.5, 0.5]
+    vcam_enabled = _field(vcam[1], "m_Enabled") != "0"
+    # the live pipeline is the child the vcam names in m_ComponentOwner - a rig can carry a
+    # second, unused "cm" (104701 touch1/2: an undamped leftover beside the damped one)
+    owner = _ref(_field(vcam[1], "m_ComponentOwner"))[0]
+    owner_go = tf[owner]["go"] if owner in tf else None
+    composers = [(b, _ref(_field(b, "m_GameObject"))[0]) for c, b in docs.values()
+                 if c == "114" and "m_TrackedObjectOffset" in b]
+    composer_body = next((b for b, g in composers if g == owner_go), composers[0][0] if composers else None)
+    composer = Composer(composer_body)
+    offset = composer.offset
 
     # the camera AnimationTrack: bound to an Animator on the rig above the vcam
     rig_chain = chain(vcam_tf)
@@ -360,25 +512,38 @@ def sequence(proj: Project, prefab: str) -> dict | None:
         ends.append(clips[cam_track["infinite"]].stop_time)
     duration = max(ends)
 
+    # camera cuts restart the composer (no damping carried across a cut)
+    cut_starts = sorted(round(c["start"] * SIM_HZ) for t in tracks
+                        if t["type"] == "StoryTimelineCameraCutTypeTrack" and not t["muted"] for c in t["clips"])
     frames = []
-    for i in range(int(round(duration * FPS)) + 1):
-        t = min(i / FPS, duration)
+    ticks = int(round(duration * SIM_HZ))
+    step = SIM_HZ // FPS
+    for tick in range(ticks + 1):
+        t = min(tick / SIM_HZ, duration)
+        if tick in cut_starts and tick:
+            composer.reset()
         clip, lt = active(t)
         fl = lambda k, d: evaluate(clip.floats[k], lt, 1)[0] if clip and k in clip.floats else d
         cam = world(vcam_tf, clip, lt)
         pos = [cam[k][3] for k in range(3)]
         dutch = fl("m_Lens.Dutch", lens["Dutch"])
+        fov = fl("m_Lens.FieldOfView", lens["FieldOfView"])
+        raw = [row[:3] for row in cam[:3]]
+        target = None
         if look_tf:
             lw = world(look_tf, clip, lt) if anim_tf in chain(look_tf) else static_world(look_tf)
             off = [fl(f"m_TrackedObjectOffset.{a}", offset[i2]) for i2, a in enumerate("xyz")]
             target = [lw[k][3] + sum(lw[k][j] * off[j] for j in range(3)) for k in range(3)]
-            r = look_rotation([target[k] - pos[k] for k in range(3)])
+            r = composer.step(pos, raw, target, fov, 1.0 / SIM_HZ)
         else:
-            r = [row[:3] for row in cam[:3]]
+            r = raw
+        if tick % step:
+            continue
         r = roll(r, dutch)
         frames.append({"t": round(t, 5), "position": [round(c, 6) for c in pos],
                        "rotation": [round(c, 7) for c in m_quat(r)],
-                       "fov": round(fl("m_Lens.FieldOfView", lens["FieldOfView"]), 4), "dutch": round(dutch, 4)})
+                       "fov": round(fov, 4), "dutch": round(dutch, 4),
+                       "look_at": [round(c, 6) for c in target] if target else None})
 
     schedule = []
     for t in tracks:
@@ -426,7 +591,7 @@ def sequence(proj: Project, prefab: str) -> dict | None:
     return {"sequence": os.path.splitext(os.path.basename(prefab))[0],
             "timeline": os.path.relpath(playable, proj.assets), "fps": FPS, "duration": round(duration, 5),
             "space": "Unity world: left-handed, Y up, metres; the timeline root (where the character stands) at the origin",
-            "lens": lens, "composer": {"tracked_object_offset": offset, "damping": damp, "screen": screen},
+            "lens": lens, "composer": composer.describe(), "camera_enabled": vcam_enabled,
             "look_at": tf[look_tf]["name"] if look_tf else None,
             "camera_rig": "/".join(tf[x]["name"] for x in chain(vcam_tf)),
             "character_schedule": schedule, "facial": facial, "camera_cuts": cuts, "animated_props": props,
@@ -546,7 +711,7 @@ def export_characters(cid: str, job: dict, merged_dir: str, outputs: list[tuple[
 
 # ------------------------------------------------------------------ facial, lips, audio
 VOICE_CUE = {"debut": "greet", "touch1": "talk1", "touch2": "talk2", "touch3": "talk3"}
-LIP_SHAPES = ("Mouth_a", "Mouth_i", "Mouth_u", "Mouth_e", "Mouth_o")   # CriLipsExPlayer A I U E O
+LIP_SHAPES = ("Mouth_a", "Mouth_i", "Mouth_u", "Mouth_e", "Mouth_o")   # CriLipsExPlayer A I U E O (I unused)
 
 
 def rig_prefab(skin: str, cid: str, ui: bool) -> str | None:
@@ -610,11 +775,19 @@ def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
     cue = VOICE_CUE.get(data["sequence"])
     lip = extract_voice.lips(f"vo_sys_{skin}", lang).get(f"v_s_{skin}_{cue}") if lang and cue else None
     if lip:
+        # CriLipsExPlayer.LateUpdate: lip frame = playback ms / 33 (not 30 fps), weight = raw/10
+        # on the mouth's A/I/U/E/O channels - but I is -1 (the constructor default, and the
+        # field is not serialized), so the game never applies the "i" vowel: only a/u/e/o.
         mouth = zlib.crc32(b"Mouth")
+        aiueo = lip["aiueo"]
         for k, shape in enumerate(LIP_SHAPES):
+            if k == 1:
+                continue
             vals = chans.setdefault((mouth, zlib.crc32(shape.encode())), [0.0] * n)
-            for i, fr in enumerate(lip["aiueo"][:n]):
-                vals[i] = fr[k]
+            for i in range(n):
+                j = int(i * 1000 / FPS / 33)
+                if j < len(aiueo):
+                    vals[i] = aiueo[j][k]
     spec = {"fps": FPS, "frames": n, "lips": f"v_s_{skin}_{cue} ({lang})" if lip else None,
             "note": "mesh / shape are CRC32 of the SkinnedMeshRenderer path and the blend-shape "
                     "channel name (e.g. CRC32('Mouth'), CRC32('Mouth_a')); values 0..1",
@@ -891,11 +1064,23 @@ def main() -> int:
                     print(f"   morphs [{lang}]: {nch} channels -> {os.path.basename(mj)}")
             if outputs:
                 export_characters(cid, job, merged_dir, outputs)
-            blender({"model": job["model"], "prefab": job["prefab"],
-                     "sequences": [{"stem": s, "json": js,
-                                    "camera_fbx": os.path.join(out_dir, f"{s}.camera.fbx"),
-                                    "character_fbx": os.path.join(out_dir, f"{s}.character.fbx"),
-                                    "preview": os.path.join(out_dir, f"{s}_preview")} for s, js in done]})
+            live = []
+            for s_, js_ in done:
+                if json.load(open(js_)).get("camera_enabled", True):
+                    live.append((s_, js_))
+                    continue
+                # the rig's vcam is disabled: the game stays on its home camera (placed by
+                # game code), so the sequence has no camera of its own
+                print(f"   {s_}: virtual camera disabled in the timeline - no camera (home camera)")
+                stale = os.path.join(out_dir, f"{s_}.camera.fbx")
+                if os.path.isfile(stale):
+                    os.remove(stale)
+            if live:
+                blender({"model": job["model"], "prefab": job["prefab"],
+                         "sequences": [{"stem": s, "json": js,
+                                        "camera_fbx": os.path.join(out_dir, f"{s}.camera.fbx"),
+                                        "character_fbx": os.path.join(out_dir, f"{s}.character.fbx"),
+                                        "preview": os.path.join(out_dir, f"{s}_preview")} for s, js in live]})
     return 0
 
 
