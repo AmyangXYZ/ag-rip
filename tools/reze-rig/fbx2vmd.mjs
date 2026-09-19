@@ -1,4 +1,4 @@
-// Bundled from reze-rig (https://github.com/AmyangXYZ/reze-rig, MIT) scripts/fbx2vmd.ts @ 853e19a. See tools/reze-rig/README.md.
+// Bundled from reze-rig (https://github.com/AmyangXYZ/reze-rig, MIT) scripts/fbx2vmd.ts @ d3ed833. See tools/reze-rig/README.md.
 
 // scripts/fbx2vmd.ts
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from "node:fs";
@@ -42583,11 +42583,41 @@ function axisDepth(eye, forward) {
 function unwrap(angle, previous) {
   return angle + 2 * Math.PI * Math.round((previous - angle) / (2 * Math.PI));
 }
+var CUT_TURN_DEG = 20;
+var CUT_MOVE_RATIO = 25;
+function shotFov(frames) {
+  const n = frames.length;
+  const moves = [];
+  for (let i = 1; i < n; i++) {
+    const a = frames[i - 1].position;
+    const b = frames[i].position;
+    moves.push(Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]));
+  }
+  const typical = [...moves].sort((x, y) => x - y)[Math.floor(moves.length / 2)] ?? 0;
+  const cut = (i) => {
+    const f0 = frames[i - 1].forward;
+    const f1 = frames[i].forward;
+    const dot = Math.max(-1, Math.min(1, f0[0] * f1[0] + f0[1] * f1[1] + f0[2] * f1[2]));
+    const turn = Math.acos(dot) / DEG;
+    return turn > CUT_TURN_DEG || typical > 0 && moves[i - 1] > typical * CUT_MOVE_RATIO;
+  };
+  const held = new Array(n);
+  let start = 0;
+  for (let i = 1; i <= n; i++) {
+    if (i < n && !cut(i)) continue;
+    const angles = frames.slice(start, i).map((f) => f.fovY).sort((x, y) => x - y);
+    const fov = Math.max(1, Math.round(angles[Math.floor(angles.length / 2)]));
+    for (let k = start; k < i; k++) held[k] = fov;
+    start = i;
+  }
+  return held;
+}
 function sceneScale(figureHeight) {
   return figureHeight ? MMD_FIGURE_HEIGHT / figureHeight : MMD_UNITS_PER_METRE;
 }
 function cameraToMmd(camera, scale, subject) {
   const keys = [];
+  const heldFov = shotFov(camera.frames);
   let yaw = 0;
   let roll = 0;
   camera.frames.forEach((frame, i) => {
@@ -42601,7 +42631,7 @@ function cameraToMmd(camera, scale, subject) {
     yaw = i === 0 ? Math.atan2(forward[0], forward[2]) : unwrap(Math.atan2(forward[0], forward[2]), yaw);
     roll = i === 0 ? Math.atan2(right[1], up[1]) : unwrap(Math.atan2(right[1], up[1]), roll);
     const reach = Math.max(1, subject ? depthOf(subject(i / FPS3), eye, forward) : axisDepth(eye, forward));
-    const fov = Math.max(1, Math.round(frame.fovY));
+    const fov = heldFov[i];
     const back = reach * Math.tan(frame.fovY * DEG / 2) / Math.tan(fov * DEG / 2);
     keys.push({
       frame: i,

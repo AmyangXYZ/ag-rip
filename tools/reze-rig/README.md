@@ -8,7 +8,7 @@ its exports into VMD on its own, with nothing but Node.js.
 | | |
 | --- | --- |
 | Source | https://github.com/AmyangXYZ/reze-rig, `scripts/fbx2vmd.ts` + `lib/` |
-| Commit | `853e19acaed9ba37b025464c56ba9b4f66eadc46` ("Carry a motion's blend-shape animation into its VMD as morphs") |
+| Commit | `d3ed8332c9fc0243017f01524e4c5a6783cd62ef` ("Hold one whole-degree fov per shot, so a zoom doesn't jitter") |
 | Bundled with it | `reze-engine` 0.55.2 (VMD writer, PMX loader) |
 | License | MIT, © 2026 Amyang (`LICENSE`, copied from reze-rig) |
 
