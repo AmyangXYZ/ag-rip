@@ -67,6 +67,7 @@ COMMANDS = {
     "scenes": ("scenes.py", "index and export the 3D stages"),
     "stage": ("stage_unity.py", "one stage -> standalone Unity project (AG_stages)"),
     "voice": ("extract_voice.py", "voice / scene audio banks -> WAV (zh, ja if downloaded) + lip-sync data"),
+    "vmd": ("to_vmd.py", "camera sequences -> VMD (motion + morphs, camera) via vendored reze-rig fbx2vmd"),
     "cams": ("export_cameras.py", "a skin's authored camera sequences (win, DLC interactions) -> camera + character FBX, JSON"),
     "stages": ("stage_catalog.py", "DLC skin -> stage table with previews (AG_stage_names)"),
     "rig": ("export_fbx.py", "export the rigged, textured FBX"),

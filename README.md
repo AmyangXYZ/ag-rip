@@ -322,9 +322,13 @@ root) playing excerpts of its clips, camera-cut blends and props.
   rest joints (residual ~1e-8), written with `export_anim_fbx`'s FBX settings, keyed on
   the same frames. `.camera.json` holds the per-frame pose in Unity space for engines.
 - Previews are rendered from the final FBXs re-imported fresh (what a consumer sees).
-- **To VMD** (reze-rig, not this repo): `node fbx2vmd.mjs <seq>.character.fbx <seq>.camera.fbx
-  --target-pmx <model.pmx> --bind-ref <reze-rig>/public/fbx/Idle.fbx --out AG_vmd/<cid>/cameras`
-  writes the motion + morph VMD and the camera VMD; copy the `.wav` beside them.
+- **To VMD**: `python ag.py vmd <skin> --target-pmx <model.pmx>` writes, per sequence,
+  `<seq>.character.vmd` (motion + facial/lip morphs) and `<seq>.camera.vmd` into
+  `AG_vmd/<cid>/cameras/`, with the `.wav` beside them. The conversion is
+  **[reze-rig](https://github.com/AmyangXYZ/reze-rig)**'s `fbx2vmd` (MIT), vendored as a
+  single Node bundle in `tools/reze-rig/` - see its README for the source commit, what
+  it does and how to rebuild it. Target models are not included (the 托特 PMX forbids
+  redistribution); pass your own.
 - **Facial + lips + voice** (DLC interactions): the sequences play on the home-screen
   model (`<skin>ui_tpose`: Eye / Eyebrow / Mouth / Pupil meshes with named blend shapes).
   Facial curves come from the timeline's facial track (109501: `FacialAni*` clips; 104701:
@@ -371,6 +375,14 @@ Re-run: `python tools/re/codephil.py metadata`, Il2CppDumper on it, then
 `tools/ghidra_12.1.3_PUBLIC/support/analyzeHeadless.bat AG_cache/re/ghidra GA -import|-process ...`
 (see the script headers).
 
+## Credits
+
+- **[reze-rig](https://github.com/AmyangXYZ/reze-rig)** (MIT, Amyang): FBX -> MMD VMD
+  retargeting, blend-shape -> morph mapping and camera VMDs. `tools/reze-rig/fbx2vmd.mjs`
+  is a build of its `scripts/fbx2vmd.ts`, vendored unchanged so ag-rip runs on its own.
+- AssetRipper, AssetStudioMod, USCSandbox (patched), Il2CppDumper, Ghidra, vgmstream -
+  third-party tools used from `tools/`, not redistributed here.
+
 ## Requirements
 
 - **Blender 3.x-4.3** (auto-detected: newest install under Program Files or
@@ -385,6 +397,7 @@ Re-run: `python tools/re/codephil.py metadata`, Il2CppDumper on it, then
 - Stages: Unity 6000.6.1f1 (path in `agtools/stage_unity.py`); `tools/USCSandbox`
   (upstream checkout + `tools/uscsandbox-aethergazer.patch`, built with the .NET SDK
   in `tools/dotnet` into `tools/uscs`; then `python tools/uscs_builtin_names.py`)
+- VMD: Node.js (runs the vendored reze-rig bundle)
 - Audio: `tools/vgmstream` (vgmstream-cli release zip), Python `UnityPy`
 - Reverse engineering: `tools/Il2CppDumper`, `tools/ghidra_12.1.3_PUBLIC`, JDK 21 in
   `tools/jdk`, Python `unicorn` + `capstone`
