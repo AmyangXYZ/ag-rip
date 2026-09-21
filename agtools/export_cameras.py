@@ -1000,8 +1000,11 @@ def run_in_blender(payload: str) -> None:
     from unity_yaml import parse_prefab
     job = json.load(open(payload))
 
+    from blender_fbx_fixes import tolerate_foreign_skin
+
     def import_fbx(path, anim=True):
         before = set(bpy.data.objects)
+        tolerate_foreign_skin()           # a mesh skinned across two skeleton roots (113701)
         bpy.ops.import_scene.fbx(filepath=path, use_anim=anim, automatic_bone_orientation=False,
                                  ignore_leaf_bones=False)
         return [o for o in bpy.data.objects if o not in before]

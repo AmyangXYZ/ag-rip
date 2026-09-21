@@ -341,6 +341,9 @@ def run_in_blender(payload_path: str) -> None:
     def import_rig(fbx_path: str):
         bpy.ops.wm.read_factory_settings(use_empty=True)
         tolerate_inbetween_shapes()
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from blender_fbx_fixes import tolerate_foreign_skin
+        tolerate_foreign_skin()           # 113701's home rig: a mesh skinned across two roots
         bpy.ops.import_scene.fbx(filepath=fbx_path, use_anim=False,
                                  automatic_bone_orientation=False,
                                  ignore_leaf_bones=False)
@@ -377,13 +380,19 @@ def run_in_blender(payload_path: str) -> None:
                 best, best_err = p, err
         rot_rms = (best_err / len(pairs)) ** 0.5
 
-        # Uniform scale, recovered from translations once the axes line up.
-        num = den = 0.0
+        # Uniform scale, recovered from translations once the axes line up: the
+        # MEDIAN of the per-bone ratios, not one least-squares ratio over all of them.
+        # On a healthy rig every ratio agrees and the two are the same number; on
+        # 113701's home rig the weapon bones (Bone_MF_*, Bone_JT_*) hang 0.73 away
+        # from where the prefab puts them, and pooled they dragged the scale to 1.0099
+        # - enough to put 144 of 217 bones out and refuse the whole set.
+        ratios = []
         for _, lu, lb in pairs:
             pu = best @ lu.to_translation()
-            num += pu.dot(lb.to_translation())
-            den += pu.dot(pu)
-        scale = num / den if den > 1e-12 else 1.0
+            if pu.dot(pu) > 1e-8:
+                ratios.append(pu.dot(lb.to_translation()) / pu.dot(pu))
+        ratios.sort()
+        scale = ratios[len(ratios) // 2] if ratios else 1.0
 
         c3 = best * scale
         c4 = c3.to_4x4()
