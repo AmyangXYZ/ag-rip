@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 r"""An exported stage -> the PMX folder reze.design loads.
 
-    python ag.py pmx x333                   -> AG_pmx/x333-stage/X333.pmx + tex/ + maps/ + X333.hdr
+    python ag.py pmx x333                   -> AG_pmx/x333-stage/X333.pmx + tex/ + maps/ + X333.hdr + X333.lights.json
     python ag.py pmx x305 x323 x333         several
     python ag.py pmx x333 --scale 12.5      a project whose unit is a metre
     python ag.py pmx x333 --albedo 1024     cap the textures, for a stage too heavy to ship

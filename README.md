@@ -234,10 +234,13 @@ material **name** is what a person assigns a look to on the other side.
 
 ```
 AG_pmx/x343-stage/
-  X343.pmx      geometry at MMD scale, one material per Unity material
-  tex/          the albedo each material samples, at the game's own resolution
-  maps/         its relief map, named `<albedo>_N.png` so the pairing needs no sidecar
-  X343.hdr      the scene's ambient gradient with the reflection probe as structure
+  X343.pmx          geometry at MMD scale, one material per Unity material, and a
+                    `flame.NN` bone on every candle wick
+  tex/              the albedo each material samples, at the game's own resolution
+  maps/             its relief map, named `<albedo>_N.png` so the pairing needs no sidecar
+  X343.hdr          the scene's ambient gradient, in linear as the game lights with
+                    it, with the reflection probe as structure
+  X343.lights.json  the lamps the game switches on, and its sun
 ```
 
 Upload that folder to reze.design as a stage. **Textures are copied, not
@@ -246,11 +249,21 @@ was the default for a while and it cost the thing the conversion is for: the
 frame this came out of is sharp, and a stage that is nearly it reads as a worse
 stage rather than a cheaper one. `--albedo N` / `--normal N` cap the longest edge
 when a stage really is too heavy. The `.hdr` installs itself onto the World
-(HDRI) slot on load, filled or not — a stage is a place and the light in it
-belongs to it — and water reflects it, so without it the ripples have nothing to
-mirror. The lighting rig is deliberately
-left behind — a game's sun, ambient and lamps were authored for its own renderer
-and its own subject, and X305's four lamps stand *inside a piano* and reach 0.7 m.
+(HDRI) slot on load at strength 1, filled or not — a stage is a place and the light
+in it belongs to it — and water reflects it, so without it the ripples have nothing
+to mirror.
+
+**The lighting rig comes across** in `X343.lights.json`: every lamp the game
+switches on, with its reach and cone, and a brightness fitted so the same light
+lands on the stage's own surfaces — the game's falloff is inverse-square and
+reze's is not — plus the sun, converted to the app's. reze.design reads it into
+the scene on upload and takes it back, with the sky, when the stage is deleted.
+**Candle flames** — one particle per wick in the game — become bones named
+`flame.NN` from the flame's foot to its tip, and the *Candle Flames (wick bones)*
+effect stands a flame on each. The converter's README has the numbers: the game's
+gamma-space light intensity, the shape-radius cap, and where the visible flame
+sits on the game's card.
+
 What a stage does carry, it carries in the PMX itself: two-sidedness and the
 shadow bits from `_Cull`, a plant's vertical tint folded into its material colour,
 metal/roughness/AO packed into the spare `specular` field, normal strength in
