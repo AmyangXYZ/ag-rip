@@ -662,14 +662,100 @@ def _sequence_data(proj: Project, prefab: str, playable: str, tracks: list[dict]
                 if sheet and cue:
                     audio.append({"sheet": sheet, "cue": cue, "start": round(c["start"], 5),
                                   "voice": _field(body, "mIsVoice") == "1" or sheet.startswith("vo_")})
+    placement = character_placement(tracks, is_char, duration)
     return {"sequence": os.path.splitext(os.path.basename(prefab))[0],
             "timeline": os.path.relpath(playable, proj.assets), "fps": FPS, "duration": round(duration, 5),
             "space": "Unity world: left-handed, Y up, metres; the timeline root (where the character stands) at the origin",
             **camera,
             "character_schedule": schedule, "facial": facial, "camera_cuts": cuts, "animated_props": props,
-            "audio_cues": audio, "frames": frames}
+            "audio_cues": audio, "placement": placement, "frames": frames}
 
 
+
+
+def _euler_q(e):
+    """Unity's Quaternion.Euler (degrees): Z, then X, then Y."""
+    x, y, z = (math.radians(v) / 2 for v in e)
+    qx = (math.sin(x), 0.0, 0.0, math.cos(x))
+    qy = (0.0, math.sin(y), 0.0, math.cos(y))
+    qz = (0.0, 0.0, math.sin(z), math.cos(z))
+    return _qmul(_qmul(qy, qx), qz)
+
+
+def _path_is(p: str, name: str) -> bool:
+    """A clip path, plain or CRC-hashed ("path_0x1234ABCD_..."), naming `name`."""
+    if p == name:
+        return True
+    m = re.match(r"path_0x([0-9A-Fa-f]{8})", p)
+    return bool(m) and int(m.group(1), 16) == zlib.crc32(name.encode("utf-8")) & 0xFFFFFFFF
+
+
+def _qmul(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz)
+
+
+def _qrot(q, v):
+    r = _qmul(_qmul(q, (v[0], v[1], v[2], 0.0)), (-q[0], -q[1], -q[2], q[3]))
+    return r[:3]
+
+
+def character_placement(tracks: list[dict], is_char, duration: float) -> list | None:
+    """Where the sequence moves the character's own object, frame by frame.
+
+    The character clips animate the skeleton UNDER her object; the object itself is
+    placed by a recorded track of its own - bound to her parent ("@102201ui") and
+    animating the path "102201ui_tpose", or bound to her and animating "". 102201's
+    debut is the case that showed it: the object stands 2.81 m back turned -59 deg for
+    the opening shots, then steps to (0.11, -0.46) at +9.5 deg, then home - which is
+    exactly where each shot's camera looks. Without it her body plays at the origin
+    and two shots film empty sand. None when nothing moves her.
+    """
+    sys.path.insert(0, HERE)
+    from unity_yaml import evaluate, parse_anim
+    char = next((t["name"] for t in tracks if not t["muted"] and is_char(t["name"])
+                 and t["type"] in ("AnimationTrack", "ManualAnimatorTrack")), None)
+    if not char:
+        return None
+    parent, _, obj = char.rpartition("/")
+    sources = []
+    for t in tracks:
+        if t["muted"] or t["type"] != "AnimationTrack":
+            continue
+        target = obj if t["name"] == parent else ("" if t["name"] == char else None)
+        if target is None:
+            continue
+        entries = ([{"anim": t["infinite"], "start": 0.0, "duration": 1e9, "clip_in": 0.0, "time_scale": 1.0}]
+                   if t["infinite"] else [dict(c) for c in t["clips"] if c.get("anim")])
+        for e in entries:
+            clip = parse_anim(e["anim"])
+            pos = next((k for q, k in clip.position.items() if _path_is(q, target)), None)
+            rot = next((k for q, k in clip.rotation.items() if _path_is(q, target)), None)
+            eul = next((k for q, k in clip.euler.items() if _path_is(q, target)), None)
+            if pos or rot or eul:
+                sources.append((e, clip, pos, rot, eul))
+    if not sources:
+        return None
+    out = []
+    for i in range(int(round(duration * FPS)) + 1):
+        t = i / FPS
+        p, q = (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)
+        for e, clip, pos, rot, eul in sources:
+            if not (e["start"] - 1e-6 <= t < e["start"] + e["duration"]):
+                continue
+            lt = min(max(e["clip_in"] + (t - e["start"]) * e["time_scale"], 0.0), clip.stop_time)
+            if pos:
+                p = tuple(evaluate(pos, lt, 3))
+            if rot:
+                q = tuple(evaluate(rot, lt, 4))
+            elif eul:
+                q = _euler_q(evaluate(eul, lt, 3))
+        out.append([[round(v, 6) for v in p], [round(v, 7) for v in q]])
+    if all(abs(v) < 1e-6 for f in out for v in f[0]) and all(abs(f[1][3]) > 1 - 1e-9 for f in out):
+        return None
+    return out
 
 
 # ------------------------------------------------------------------ character: merged clip
@@ -693,7 +779,8 @@ def win_source(job: dict) -> str | None:
     return os.path.join(job["dir"], wins[0]) if wins else None
 
 
-def write_merged_clip(path: str, name: str, schedule: list[dict], duration: float) -> None:
+def write_merged_clip(path: str, name: str, schedule: list[dict], duration: float,
+                      placement: list | None = None) -> None:
     """Sample the schedule (clip excerpts at timeline offsets) into one Unity clip, one
     key per frame; parse_anim / export_anim_fbx read it like any ripped clip. Timeline
     semantics: outside every clip the nearest clip holds its edge pose."""
@@ -726,6 +813,19 @@ def write_merged_clip(path: str, name: str, schedule: list[dict], duration: floa
                     other = next(cc for cc in clips.values() if p in getattr(cc, g))
                     src, lt2 = getattr(other, g)[p], min(lt, other.stop_time)
                 keys[g][p].append((t, evaluate(src, lt2, ncomp)))
+
+    # The object's placement rides on "root", the skeleton's top: its world transform
+    # is placement x root, and export_anim_fbx folds root onto the hip for the retarget.
+    root_pos = next((q for q in paths["position"] if _path_is(q, "root")), None)
+    root_rot = next((q for q in paths["rotation"] if _path_is(q, "root")), None)
+    if placement and root_pos and root_rot:
+        for i in range(min(n, len(placement))):
+            pp, pq = placement[i]
+            t, rp = keys["position"][root_pos][i]
+            _, rq = keys["rotation"][root_rot][i]
+            wp = _qrot(pq, rp)
+            keys["position"][root_pos][i] = (t, (pp[0] + wp[0], pp[1] + wp[1], pp[2] + wp[2]))
+            keys["rotation"][root_rot][i] = (t, _qmul(pq, rq))
 
     section = {"rotation": "m_RotationCurves", "position": "m_PositionCurves",
                "scale": "m_ScaleCurves", "euler": "m_EulerCurves"}
@@ -1162,7 +1262,8 @@ def main() -> int:
                 plan = ", ".join(f"{s['clip']}@{s['start']:g}s" for s in sched) or "-"
                 print(f"{stem}: {data['duration']:.2f}s, {len(data['camera_cuts'])} cut(s), character: {plan}")
                 if sched and all(s["anim"] and os.path.isfile(s["anim"]) for s in sched):
-                    write_merged_clip(os.path.join(merged_dir, f"{stem}.anim"), stem, sched, data["duration"])
+                    write_merged_clip(os.path.join(merged_dir, f"{stem}.anim"), stem, sched, data["duration"],
+                                      data.get("placement"))
                 if kind == "dlc" and not args.no_fbx:
                     audio = export_audio(skin, data, out_dir, stem, langs[0])
                     if audio:
