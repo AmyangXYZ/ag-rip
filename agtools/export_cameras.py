@@ -1238,6 +1238,8 @@ def main() -> int:
             shutil.rmtree(merged_dir, ignore_errors=True)
             os.makedirs(merged_dir)
             done = []
+            spots_path = os.path.join(out_dir, f"{skin}.spots.json")
+            spots = json.load(open(spots_path)) if kind == "dlc" and os.path.isfile(spots_path) else {}
             for prefab in prefabs:
                 data = sequence(proj, prefab)
                 if not data:
@@ -1248,6 +1250,12 @@ def main() -> int:
                 if only and name not in only:
                     continue
                 data["sequence"] = name
+                if not data.get("placement") and name in spots:
+                    # stage-space cameras, placed by game code: the anchor fit_spots found
+                    x, y, z, yaw = spots[name]
+                    q = [0.0, math.sin(math.radians(yaw) / 2), 0.0, math.cos(math.radians(yaw) / 2)]
+                    data["placement"] = [[[x, y, z], q]] * (int(round(data["duration"] * FPS)) + 1)
+                    data["placement_source"] = f"{skin}.spots.json (fitted)"
                 stem = f"{skin}@{name}"
                 sched = data["character_schedule"]
                 if kind == "win":               # the win clip is an external the rip leaves unresolved
