@@ -1211,6 +1211,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("skins", nargs="+", help="skin ids, e.g. 109501 104701")
     ap.add_argument("--only", help="comma list of sequences (win, debut, touch1, ...)")
+    ap.add_argument("--local", action="store_true",
+                    help="leave the sequence's placement out of the character FBX (it stays in the JSON); "
+                         "for placing her with vmd_placement.py on a model of another height")
     ap.add_argument("--no-fbx", action="store_true", help="JSON only")
     ap.add_argument("--lang", default="zh", help="voice / lip-sync languages, comma list; the first is "
                     "character.fbx and the audio, others add character.<lang>.fbx (e.g. zh,ja)")
@@ -1271,7 +1274,7 @@ def main() -> int:
                 print(f"{stem}: {data['duration']:.2f}s, {len(data['camera_cuts'])} cut(s), character: {plan}")
                 if sched and all(s["anim"] and os.path.isfile(s["anim"]) for s in sched):
                     write_merged_clip(os.path.join(merged_dir, f"{stem}.anim"), stem, sched, data["duration"],
-                                      data.get("placement"))
+                                      None if args.local else data.get("placement"))
                 if kind == "dlc" and not args.no_fbx:
                     audio = export_audio(skin, data, out_dir, stem, langs[0])
                     if audio:
