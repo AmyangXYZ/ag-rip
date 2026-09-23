@@ -220,60 +220,22 @@ character and writes a contact sheet — read the names off it, save as `names.j
 | `ag.py scenes [--grep X]` | stage index: 544 codes across `comscene`, `comsceneq`, `comeffect`, `levels` (`--index` rebuilds, ~5 min) |
 | `ag.py stages [--char 1095]` | DLC skin → stage table + pictures → `AG_stage_names/` (`contact_sheet.html`) |
 | `ag.py stage x343` | one stage → standalone Unity project → `AG_stages/x343/` (`comeffect/x100` picks the folder; `sourcespace` = all 7 modifier-mode spaces in one project, a scene each) |
-| `ag.py pmx x343` | that project → the PMX folder reze.design loads → `AG_pmx/x343-stage/` |
 | `ag.py cams 109501 104701` | a skin's authored camera sequences (victory pose + every DLC home-screen interaction) -> `AG_fbx_anim/<cid>/cameras/<skin>@<seq>.camera.fbx` + `.character.fbx` + `.camera.json` + previews - see "Camera sequences" |
 | `agtools/stage_thumbs.py --prefix x` | render each stage (glb → Blender) → `AG_stage_names/render/` |
 | `agtools/bundle_deps.py <bundle>` | a bundle's full dependency closure (`--index` rebuilds the CAB map, ~8 min) |
 
-### To a model (`ag.py pmx`)
+### The hand-off
 
-`ag.py stage` makes a Unity project that renders like the game; `ag.py pmx` makes
-a model anything can open. It reads the exported project directly — no Blender,
-no FBX, because every hop through another format renames a material, and the
-material **name** is what a person assigns a look to on the other side.
+`ag.py stage` is where this repo's part of a stage ends: a standalone Unity
+project that renders like the game, with the scene, its materials, its lighting
+rig and its textures in place. reze-design's `tools/stages/unity_to_glb.py`
+reads that project and takes it the rest of the way, through Blender, to the
+`.glb` the app loads.
 
-```
-AG_pmx/x343-stage/
-  X343.pmx          geometry at MMD scale, one material per Unity material, and a
-                    `flame.NN` bone on every candle wick
-  tex/              the albedo each material samples, at the game's own resolution
-  maps/             its relief map, named `<albedo>_N.png` so the pairing needs no sidecar
-  X343.hdr          the scene's ambient gradient, in linear as the game lights with
-                    it, with the reflection probe as structure
-  X343.lights.json  the lamps the game switches on, and its sun
-```
-
-Upload that folder to reze.design as a stage. **Textures are copied, not
-resized** — a 2048 albedo arrives as a 2048 albedo, normal maps too. Downscaling
-was the default for a while and it cost the thing the conversion is for: the
-frame this came out of is sharp, and a stage that is nearly it reads as a worse
-stage rather than a cheaper one. `--albedo N` / `--normal N` cap the longest edge
-when a stage really is too heavy. The `.hdr` installs itself onto the World
-(HDRI) slot on load at strength 1, filled or not — a stage is a place and the light
-in it belongs to it — and water reflects it, so without it the ripples have nothing
-to mirror.
-
-**The lighting rig comes across** in `X343.lights.json`: every lamp the game
-switches on, with its reach and cone, and a brightness fitted so the same light
-lands on the stage's own surfaces — the game's falloff is inverse-square and
-reze's is not — plus the sun, converted to the app's. reze.design reads it into
-the scene on upload and takes it back, with the sky, when the stage is deleted.
-**Candle flames** — one particle per wick in the game — become bones named
-`flame.NN` from the flame's foot to its tip, and the *Candle Flames (wick bones)*
-effect stands a flame on each. The converter's README has the numbers: the game's
-gamma-space light intensity, the shape-radius cap, and where the visible flame
-sits on the game's card.
-
-What a stage does carry, it carries in the PMX itself: two-sidedness and the
-shadow bits from `_Cull`, a plant's vertical tint folded into its material colour,
-metal/roughness/AO packed into the spare `specular` field, normal strength in
-`shininess`, and **the source shader in each material's memo** — which is how a
-pane of glass named `Terrain_X333_005` still gets the glass look.
-
-The converter is vendored at `tools/unity-stage/` (reze-design's own file) and
-runs on its own with `--project/--scale/--out/--name`; its README covers the traps
-— static batching, the packed `dimension` byte, and why the scale is 8 rather
-than 12.5.
+Open the project in Unity to check a stage against the game before converting
+it — `AGTools/` carries the pipeline, the shadow and post-FX stand-ins and a
+camera, so a play-mode frame is the reference every conversion is measured
+against.
 
 - **Dependencies.** Bundles name each other only by internal `CAB-<hash>` file name.
   `bundle_deps.py` maps those to files by reading each bundle's UnityFS directory

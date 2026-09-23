@@ -38,7 +38,6 @@ Commands
   python ag.py scenes --grep x343        stage index (code, size, label, skins)
   python ag.py stages --char 1095        DLC skin -> stage table, with pictures
   python ag.py stage x343                stage -> Unity project  -> AG_stages/x343
-  python ag.py pmx x343                  that project -> PMX folder -> AG_pmx/x343-stage
 
   python ag.py names                     build the ID -> name contact sheet
   python ag.py rename names.json --apply relabel the extracted tree
@@ -67,7 +66,6 @@ COMMANDS = {
     "audit": ("audit_clips.py", "account for every clip in the tree; show any gaps"),
     "scenes": ("scenes.py", "index and export the 3D stages"),
     "stage": ("stage_unity.py", "one stage -> standalone Unity project (AG_stages)"),
-    "pmx": ("stage_pmx.py", "that Unity project -> the PMX folder reze.design loads (AG_pmx)"),
     "voice": ("extract_voice.py", "voice / scene audio banks -> WAV (zh, ja if downloaded) + lip-sync data"),
     "vmd": ("to_vmd.py", "camera sequences -> VMD (motion + morphs, camera) via vendored reze-rig fbx2vmd"),
     "cams": ("export_cameras.py", "a skin's authored camera sequences (win, DLC interactions) -> camera + character FBX, JSON"),
