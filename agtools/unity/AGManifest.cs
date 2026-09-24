@@ -72,6 +72,7 @@ public static class AGManifest
     public static void Batch()
     {
         AGPrefabScenes.Build();
+        AGLighting.Lock();
         Run();
     }
 

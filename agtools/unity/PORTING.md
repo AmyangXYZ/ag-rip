@@ -80,6 +80,7 @@ The live pipeline is `UnityEngine.Rendering.Replica` / `ReplicaExt`, which is UR
     - With `ColorAdjustments.mode == 1`, ACES is used with exposure = 2^postExposure.
     - invert/grayness/darkness → `EXTRA_POSTEFFECT`; FXAA from `Antialiasing`.
     - Vignette and radial blur come only from a camera component that stages don't have.
+  - **Colour grading** (`ColorGradingLutPass`, every frame): `Hidden/RenderPipeline/Lut` (URP's LDR LUT builder) bakes `_ColorGraddingLut` from the volume stack (`WhiteBalance`, `ColorAdjustments`, `SplitToning`, `ChannelMixer`, `ShadowsMidtonesHighlights`, `LiftGammaGain`, `ColorCurves`) into a size² × size ARGB32 sRGB strip; size 32 with `PostProcessSetting.lutSize32`, else 16. `_LutParams.w` is an integer division in the game (= 1). `SceneSetting._colorGraddingLut` is not read.
 
 `ag_render_manifest.json` → `shaderGlobals` / `shaderKeywords` records all of these for each scene. A port can upload them verbatim and compare its output with Unity.
 
@@ -90,7 +91,6 @@ The live pipeline is `UnityEngine.Rendering.Replica` / `ReplicaExt`, which is UR
 | SSAO / GTAO | `SSAOSetting` | `shaders/Hidden/SimPipeline/ScreenSpaceAmbientOcclusion.shader`, `settings/*ScreenSpaceAmbientOcclusionFeature.json`. The stand-in feeds white and zero. |
 | Volumetric lighting and fog | `VolumetricLightingSetting`, `LocalVolumetricFog` | `compute/VolumetricFog*`, `compute/VolumetricLighting*`, `compute/GenerateMaxZ`, `shaders/Hidden/Replica/Volumetric/Final.shader` |
 | Light cookies | lights + `ReplicaAdditionalLightData` | `settings/*LightCookieFeature.json`. The stand-in sends no cookies. |
-| Colour grading LUT | `ColorAdjustments`, `LiftGammaGain`, `ShadowsMidtonesHighlights`, `WhiteBalance` | `shaders/Hidden/RenderPipeline/Lut.shader`. The stand-in uses the scene LUT only. |
 | Character and regional shadows | `SimMainLight` fields, `SIM_REGIONAL_SHADOW` | `shaders/Hidden/SimPipeline/CharacterShadow*.shader`, `DecalShadow.shader` |
 | Planar / PPR reflection | `MirrorReflection*`, PPR | `compute/PixelProjectReflection`, `shaders/Hidden/PPR/PlaneID.shader` |
 

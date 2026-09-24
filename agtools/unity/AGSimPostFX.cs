@@ -1,9 +1,10 @@
 // The game's end-of-frame, rebuilt around its own decompiled shaders:
 //   Hidden/SimPipeline/PostProcessing/Bloom  - URP-style bloom (prefilter, H/V blur, upsample)
 //   Hidden/SimPipeline/Final                 - bloom add, filmic/ACES curve, vignette, LUT
+//   Hidden/RenderPipeline/Lut                - the colour-grading LUT, baked every frame
 // Parameters come from the scene's SceneSetting (tonemapping, exposure, contrast,
-// threshold, colour-grading LUT). Bloom scatter/knee are not stored in the scene -
-// BloomPass: scatter 0.77, clamp 100, knee = threshold * 0.5 (decompiled).
+// threshold) and the volume stack (grading). Bloom scatter/knee are not stored in the
+// scene - BloomPass: scatter 0.77, clamp 100, knee = threshold * 0.5 (decompiled).
 using System.Reflection;
 using UnityEngine;
 
@@ -23,9 +24,9 @@ public class AGSimPostFX : MonoBehaviour
     [Tooltip("Flip for the fullscreen triangle; -1 on D3D-style UV conventions.")]
     public float yFlip = 0f;   // 0 = auto
 
-    Material _bloom, _final, _lut3d;
-    RenderTexture _lutStrip;
-    Texture _lutSource;
+    Material _bloom, _final, _lutBuilder;
+    RenderTexture _lut;
+    Texture2D _curveIdentity, _curveHalf;
     readonly RenderTexture[] _down = new RenderTexture[16], _up = new RenderTexture[16];
 
     static MonoBehaviour SceneSetting()
@@ -94,7 +95,9 @@ public class AGSimPostFX : MonoBehaviour
         final.SetFloat("_VignetteEnable", 0f);
         final.SetFloat("_HasGobalDistortionTexture", 0f);
         final.SetFloat("_YFlip", yFlip != 0 ? yFlip : (dst == null && SystemInfo.graphicsUVStartsAtTop ? -1f : 1f));
-        final.SetTexture("_ColorGraddingLut", Lut(ss));
+        var lut = Lut();
+        Shader.SetGlobalTexture("_ColorGraddingLut", lut);
+        final.SetTexture("_ColorGraddingLut", lut);
         Draw(src, dst, final, 0);
 
         if (bloomRT) RenderTexture.ReleaseTemporary(bloomRT);
@@ -135,26 +138,117 @@ public class AGSimPostFX : MonoBehaviour
         return result;
     }
 
-    // Final samples a 2D strip LUT: size^2 x size, slice = blue.
-    Texture Lut(object ss)
+    // ReplicaExt.PostProcessFeature.SetupRenderFeature + Replica.ColorGradingLutPass (decompiled):
+    // every frame the game bakes _ColorGraddingLut from the volume stack with
+    // Hidden/RenderPipeline/Lut (URP's LDR LUT builder) into a size^2 x size ARGB32 strip,
+    // sRGB-encoded (linear colour space); size 32 with PostProcessSetting.lutSize32, else 16.
+    // SceneSetting._colorGraddingLut is never read by this pipeline.
+    Texture Lut()
     {
-        var src = Get<byte>(ss, "_colorGradding", 0) != 0 ? Get<Texture>(ss, "_colorGraddingLut", null) : null;
-        if (_lutStrip && _lutSource == src) return _lutStrip;
-        _lutSource = src;
-        int size = src is Texture3D t3 ? t3.depth : 32;
-        if (_lutStrip) _lutStrip.Release();
-        _lutStrip = new RenderTexture(size * size, size, 0, RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Linear)
+        int size = Vol("PostProcessSetting", "lutSize32", false) ? 32 : 16;
+        if (!_lut || _lut.height != size)
+        {
+            if (_lut) _lut.Release();
+            _lut = new RenderTexture(size * size, size, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB)
+                { filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp, hideFlags = HideFlags.HideAndDontSave };
+        }
+        var m = Mat(ref _lutBuilder, "Hidden/RenderPipeline/Lut");
+        if (!m) return _lut;
+        // (h, 0.5/w, 0.5/h, h/(h-1)); the game divides the last term as integers (idiv), so it is 1
+        m.SetVector("_LutParams", new Vector4(size, 0.5f / (size * size), 0.5f / size, size / (size - 1)));
+
+        Vector3 lms = ColorBalanceToLMSCoeffs(Vol("WhiteBalance", "temperature", 0f), Vol("WhiteBalance", "tint", 0f));
+        m.SetVector("_ColorBalance", new Vector4(lms.x, lms.y, lms.z, 0f));
+        Color filter = Vol("ColorAdjustments", "colorFilter", Color.white);
+        m.SetVector("_ColorFilter", new Vector4(Mathf.GammaToLinearSpace(filter.r), Mathf.GammaToLinearSpace(filter.g),
+                                                Mathf.GammaToLinearSpace(filter.b), filter.a));
+        m.SetVector("_HueSatCon", new Vector4(Vol("ColorAdjustments", "hueShift", 0f) / 360f,
+                                              Vol("ColorAdjustments", "saturation", 0f) / 100f + 1f,
+                                              Vol("ColorAdjustments", "contrast", 0f) / 100f + 1f, 0f));
+
+        var grey = new Color(0.5f, 0.5f, 0.5f, 1f);
+        Color splitS = Vol("SplitToning", "shadows", grey), splitH = Vol("SplitToning", "highlights", grey);
+        m.SetVector("_SplitShadows", new Vector4(splitS.r, splitS.g, splitS.b, Vol("SplitToning", "balance", 0f) / 100f));
+        m.SetVector("_SplitHighlights", new Vector4(splitH.r, splitH.g, splitH.b, 0f));
+
+        m.SetVector("_ChannelMixerRed", Mixer("red", 100f, 0f, 0f));
+        m.SetVector("_ChannelMixerGreen", Mixer("green", 0f, 100f, 0f));
+        m.SetVector("_ChannelMixerBlue", Mixer("blue", 0f, 0f, 100f));
+
+        var one = new Vector4(1f, 1f, 1f, 0f);
+        m.SetVector("_Shadows", ShadowsMidtonesHighlights(Vol("ShadowsMidtonesHighlights", "shadows", one)));
+        m.SetVector("_Midtones", ShadowsMidtonesHighlights(Vol("ShadowsMidtonesHighlights", "midtones", one)));
+        m.SetVector("_Highlights", ShadowsMidtonesHighlights(Vol("ShadowsMidtonesHighlights", "highlights", one)));
+        m.SetVector("_ShaHiLimits", new Vector4(Vol("ShadowsMidtonesHighlights", "shadowsStart", 0f),
+                                                Vol("ShadowsMidtonesHighlights", "shadowsEnd", 0.3f),
+                                                Vol("ShadowsMidtonesHighlights", "highlightsStart", 0.55f),
+                                                Vol("ShadowsMidtonesHighlights", "highlightsEnd", 1f)));
+
+        // PrepareLiftGammaGain: lift x0.15, gamma/gain x0.8, each minus its luminance plus w
+        Vector4 lift = Vol("LiftGammaGain", "lift", one), gamma = Vol("LiftGammaGain", "gamma", one),
+                gain = Vol("LiftGammaGain", "gain", one);
+        Vector3 l = Lin(lift) * 0.15f, g = Lin(gamma) * 0.8f, k = Lin(gain) * 0.8f;
+        float lumL = Luminance(l), lumG = Luminance(g), lumK = Luminance(k);
+        m.SetVector("_Lift", new Vector4(l.x - lumL + lift.w, l.y - lumL + lift.w, l.z - lumL + lift.w, 0f));
+        m.SetVector("_Gamma", new Vector4(1f / Mathf.Max(g.x - lumG + gamma.w + 1f, 0.001f),
+                                          1f / Mathf.Max(g.y - lumG + gamma.w + 1f, 0.001f),
+                                          1f / Mathf.Max(g.z - lumG + gamma.w + 1f, 0.001f), 0f));
+        m.SetVector("_Gain", new Vector4(k.x - lumK + gain.w + 1f, k.y - lumK + gain.w + 1f, k.z - lumK + gain.w + 1f, 0f));
+
+        // ColorCurves: no stage overrides them, so every curve is its default TextureCurve bake
+        // (128 texels, texel i = curve(i/128)): master and RGB identity, hue/sat/lum curves 0.5
+        if (!_curveIdentity) _curveIdentity = CurveTexture(i => i / 128f);
+        if (!_curveHalf) _curveHalf = CurveTexture(i => 0.5f);
+        foreach (var c in new[] { "_CurveMaster", "_CurveRed", "_CurveGreen", "_CurveBlue" }) m.SetTexture(c, _curveIdentity);
+        foreach (var c in new[] { "_CurveHueVsHue", "_CurveHueVsSat", "_CurveSatVsSat", "_CurveLumVsSat" }) m.SetTexture(c, _curveHalf);
+
+        Draw(null, _lut, m, 0);
+        return _lut;
+    }
+
+    static Vector4 Mixer(string output, float r, float g, float b) => new Vector4(
+        Vol("ChannelMixer", output + "OutRedIn", r) / 100f, Vol("ChannelMixer", output + "OutGreenIn", g) / 100f,
+        Vol("ChannelMixer", output + "OutBlueIn", b) / 100f, 0f);
+
+    static Vector3 Lin(Vector4 c) =>
+        new Vector3(Mathf.GammaToLinearSpace(c.x), Mathf.GammaToLinearSpace(c.y), Mathf.GammaToLinearSpace(c.z));
+
+    static float Luminance(Vector3 c) => c.x * 0.2126729f + c.y * 0.7151522f + c.z * 0.072175f;
+
+    // PrepareShadowsMidtonesHighlights: linear colour + w (x4 when w >= 0), floored at 0
+    static Vector4 ShadowsMidtonesHighlights(Vector4 v)
+    {
+        float w = v.w * (v.w >= 0f ? 4f : 1f);
+        Vector3 c = Lin(v);
+        return new Vector4(Mathf.Max(c.x + w, 0f), Mathf.Max(c.y + w, 0f), Mathf.Max(c.z + w, 0f), 0f);
+    }
+
+    // SRP core ColorUtils.ColorBalanceToLMSCoeffs: white balance as LMS scale factors
+    static Vector3 ColorBalanceToLMSCoeffs(float temperature, float tint)
+    {
+        float t1 = temperature / 65f, t2 = tint / 65f;
+        float x = 0.31271f - t1 * (t1 < 0f ? 0.1f : 0.05f);
+        float y = 2.87f * x - 3f * x * x - 0.27509507f + t2 * 0.05f;
+        float X = x / y, Z = (1f - x - y) / y;      // CIExyToLMS with Y = 1
+        var lms = new Vector3(0.7328f * X + 0.4296f - 0.1624f * Z,
+                              -0.7036f * X + 1.6975f + 0.0061f * Z,
+                              0.0030f * X + 0.0136f + 0.9834f * Z);
+        return new Vector3(0.949237f / lms.x, 1.03542f / lms.y, 1.08728f / lms.z);
+    }
+
+    static Texture2D CurveTexture(System.Func<int, float> value)
+    {
+        var t = new Texture2D(128, 1, TextureFormat.RHalf, false, true)
             { filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp, hideFlags = HideFlags.HideAndDontSave };
-        var m = Mat(ref _lut3d, "Hidden/AG/LutStrip");
-        m.SetTexture("_Lut3D", src ? src : null);
-        m.SetFloat("_Identity", src ? 0f : 1f);
-        m.SetFloat("_Size", size);
-        Graphics.Blit(null, _lutStrip, m, 0);
-        return _lutStrip;
+        var px = new Color[128];
+        for (int i = 0; i < 128; i++) px[i] = new Color(value(i), 0f, 0f, 0f);
+        t.SetPixels(px);
+        t.Apply(false, true);
+        return t;
     }
 
     void OnDisable()
     {
-        if (_lutStrip) { _lutStrip.Release(); _lutStrip = null; }
+        if (_lut) { _lut.Release(); _lut = null; }
     }
 }

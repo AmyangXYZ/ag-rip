@@ -276,7 +276,8 @@ against.
   `AGVolumes.cs` (SceneSetting defaults + volume-profile overrides, blended by
   priority/weight), `AGSimShadows.cs` (cascaded main-light shadows through the game's
   SHADOWCASTER passes, CascadeShadowSetting), `AGSimPostFX.cs` (the game's BloomPass
-  and FinalPass: tonemapping, exposure, contrast, ACES, invert/grayness/darkness),
+  and FinalPass: tonemapping, exposure, contrast, ACES, invert/grayness/darkness; the
+  colour-grading LUT baked each frame from the volume stack, as ColorGradingLutPass),
   `AGStageCamera.cs` (stage camera / home viewpoints). Linear colour space with
   `lightsUseLinearIntensity = false`, as the game. Game components get their real
   serialized fields back (`gen_mono_scripts.py`); textures are the exact GPU data,
@@ -284,10 +285,12 @@ against.
   Editor helpers: `AGOpenStage.cs` (opens the stage scene, forces Linear),
   `AGEditorPlayback.cs` (menu AG > Animate in Edit Mode: animators, particles and
   scrolling materials run without Play), `AGPrefabScenes.cs` (a scene per prefab
-  stage), `AGManifest.cs`, `AGStageShot.cs` (headless screenshot:
+  stage), `AGLighting.cs` (baked/realtime GI off in every scene: the game ships no Unity
+  lightmaps and its shaders' `LIGHTMAP_ON` variants don't compile, so an editor
+  "Generate Lighting" bake turns a stage magenta), `AGManifest.cs`, `AGStageShot.cs` (headless screenshot:
   `Unity.exe -batchmode -quit -projectPath <proj> -executeMethod AGStageShot.Run -agScene <scene> -agOut <png prefix> [-agView]`).
   Not reproduced in Unity (references shipped for the port): SSAO/GTAO, volumetric
-  lighting/fog, light cookies, grading LUT bake, character/regional shadows, PPR.
+  lighting/fog, light cookies, character/regional shadows, PPR.
   TAA deliberately off.
 - **Iterating.** After changing `AG_shaders/` or `agtools/unity/`, update existing
   projects without re-exporting: `python agtools/stage_unity.py x305 x202 --refresh`

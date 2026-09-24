@@ -170,8 +170,9 @@ def set_linear_color_space(project: str) -> bool:
 
 HELPERS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "unity")
 EDITOR_HELPERS = ("AGStageShot.cs", "AGOpenStage.cs")
-PIPELINE_EDITOR_HELPERS = ("AGManifest.cs", "AGPrefabScenes.cs", "AGEditorPlayback.cs")   # need AGTools
-RUNTIME_HELPERS = ("AGSimPipeline.cs", "AGVolumes.cs", "AGSimShadows.cs", "AGSimPostFX.cs", "AGStageCamera.cs", "AGLutStrip.shader", "AGCopyDepth.shader")
+PIPELINE_EDITOR_HELPERS = ("AGManifest.cs", "AGPrefabScenes.cs", "AGEditorPlayback.cs", "AGLighting.cs")   # need AGTools
+RUNTIME_HELPERS = ("AGSimPipeline.cs", "AGVolumes.cs", "AGSimShadows.cs", "AGSimPostFX.cs", "AGStageCamera.cs", "AGCopyDepth.shader")
+RETIRED_HELPERS = ("AGLutStrip.shader",)   # removed from projects on refresh
 
 
 def copy_helpers(project: str) -> None:
@@ -184,6 +185,10 @@ def copy_helpers(project: str) -> None:
     os.makedirs(tools, exist_ok=True)
     for h in RUNTIME_HELPERS:
         shutil.copyfile(os.path.join(HELPERS, h), os.path.join(tools, h))
+    for h in RETIRED_HELPERS:
+        for f in (h, h + ".meta"):
+            if os.path.isfile(os.path.join(tools, f)):
+                os.remove(os.path.join(tools, f))
     for h in PIPELINE_EDITOR_HELPERS:
         shutil.copyfile(os.path.join(HELPERS, h), os.path.join(editor, h))
     write_viewpoints(project)
