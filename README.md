@@ -334,6 +334,15 @@ root) playing excerpts of its clips, camera-cut blends and props.
   `.character.fbx` has exactly the conventions of the per-clip FBXs (rest key, facing,
   root fold) - frame 0 = timeline 0. Do not splice exported FBXs in Blender instead: the
   re-export loses the rest-key bind pose and the retargeted facing comes out wrong.
+  Clip changes cross-fade over each clip's `ManualAnimationNode.m_blendTime` (0.3 s on
+  most; the outgoing clip keeps playing, as with `Animator.CrossFade`), body and face
+  alike. A hard cut here snaps the whole body in one frame.
+- **Where she stands**: some DLCs (109502's room, 109503's beach, 104903) author cameras
+  in stage coordinates and let game code stand her at spots no bundle states; exported
+  as-is, the camera films her back or an empty room (`"placement": null`, look-at far
+  from the origin). `python agtools/fit_spots.py <skin>` fits each spot from where the
+  camera aims and writes `<skin>.spots.json`; run `cams` again to apply it. A sequence
+  that moves her behind a cut (104903 wedding_touch_102) gets one spot per part.
 - **Camera FBX**: placed on the same rig import with a Unity->Blender mapping fitted on the
   rest joints (residual ~1e-8), written with `export_anim_fbx`'s FBX settings, keyed on
   the same frames. `.camera.json` holds the per-frame pose in Unity space for engines.

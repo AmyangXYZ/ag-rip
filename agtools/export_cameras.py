@@ -618,8 +618,11 @@ def _sequence_data(proj: Project, prefab: str, playable: str, tracks: list[dict]
             name = os.path.splitext(os.path.basename(anim))[0] if anim else None
             if name and name.lower().startswith(("facialani", "recorded")):
                 continue
+            # ManualAnimationNode.m_blendTime: the game cross-fades into the clip over this long
+            blend = float(_field(_read(c["node"]), "m_blendTime") or 0) if c["node"] else 0.0
             schedule.append({"clip": name, "start": round(c["start"], 5), "duration": round(c["duration"], 5),
-                             "clip_in": round(c["clip_in"], 5), "time_scale": c["time_scale"], "anim": anim})
+                             "clip_in": round(c["clip_in"], 5), "time_scale": c["time_scale"],
+                             "blend": round(blend, 5), "anim": anim})
     schedule.sort(key=lambda s: s["start"])
     # facial: "tpose" tracks whose clips drive blend shapes (SkinnedMeshRenderer, typeID 137)
     facial = []
@@ -637,9 +640,10 @@ def _sequence_data(proj: Project, prefab: str, playable: str, tracks: list[dict]
             if not n137:
                 continue
             stop = float(_field(body.split("m_AnimationClipSettings:")[1], "m_StopTime") or 0)
+            blend = float(_field(_read(c["node"]), "m_blendTime") or 0) if c.get("node") else 0.0
             facial.append({"clip": _field(body, "m_Name"), "stop": stop, "bindings": n137,
                            "start": c["start"], "duration": c["duration"], "clip_in": c["clip_in"],
-                           "time_scale": c["time_scale"], "infinite": bool(c.get("infinite"))})
+                           "time_scale": c["time_scale"], "blend": blend, "infinite": bool(c.get("infinite"))})
     cuts = []
     for t in tracks:
         if t["type"] == "StoryTimelineCameraCutTypeTrack" and not t["muted"]:
@@ -799,20 +803,44 @@ def write_merged_clip(path: str, name: str, schedule: list[dict], duration: floa
         s = before[-1] if before else schedule[0]
         return s, s["clip_in"] + (s["duration"] * s["time_scale"] if before else 0.0)
 
+    def sample(s, lt, g, p):
+        c = clips[s["anim"]]
+        lt = min(max(lt, 0.0), c.stop_time)
+        src = getattr(c, g).get(p)
+        if src is None:                         # path missing in this clip: any clip that has it
+            other = next(cc for cc in clips.values() if p in getattr(cc, g))
+            src, lt = getattr(other, g)[p], min(lt, other.stop_time)
+        return evaluate(src, lt, 4 if g == "rotation" else 3)
+
+    def mix(g, a, b, w):
+        if g == "rotation":                     # nlerp on the near hemisphere
+            if sum(x * y for x, y in zip(a, b)) < 0:
+                a = tuple(-x for x in a)
+            v = [x + (y - x) * w for x, y in zip(a, b)]
+            k = math.sqrt(sum(x * x for x in v)) or 1.0
+            return tuple(x / k for x in v)
+        return tuple(x + (y - x) * w for x, y in zip(a, b))
+
+    # ManualAnimationNode cross-fades into each clip over its blend time, the outgoing
+    # clip still playing (Animator.CrossFade). Cut instead, a clip change snaps the
+    # whole body in one frame (104903 wedding_touch_104: 40-108 deg at six changes).
+    prev = {id(s): p for p, s in zip(schedule, schedule[1:])}
     keys = {g: {p: [] for p in paths[g]} for g in groups}
     for i in range(n):
         t = i / FPS
         s, lt = pick(t)
-        c = clips[s["anim"]]
-        lt = min(max(lt, 0.0), c.stop_time)
+        out = prev.get(id(s))
+        if out and placement and s.get("blend"):    # she changes spot with this clip: a cut, not a fade
+            a, b = (min(int(round(x * FPS)), len(placement) - 1) for x in (s["start"] - 1 / FPS, s["start"]))
+            out = out if placement[a] == placement[b] else None
+        w = (t - s["start"]) / s["blend"] if out and s.get("blend") else 1.0
+        out_lt = out["clip_in"] + (t - out["start"]) * out["time_scale"] if w < 1 else 0.0
         for g in groups:
-            ncomp = 4 if g == "rotation" else 3
             for p in paths[g]:
-                src, lt2 = getattr(c, g).get(p), lt
-                if src is None:                 # path missing in this clip: any clip that has it
-                    other = next(cc for cc in clips.values() if p in getattr(cc, g))
-                    src, lt2 = getattr(other, g)[p], min(lt, other.stop_time)
-                keys[g][p].append((t, evaluate(src, lt2, ncomp)))
+                v = sample(s, lt, g, p)
+                if 0 <= w < 1:
+                    v = mix(g, sample(out, out_lt, g, p), v, w)
+                keys[g][p].append((t, v))
 
     # The object's placement rides on "root", the skeleton's top: its world transform
     # is placement x root, and export_anim_fbx folds root onto the hip for the retarget.
@@ -956,16 +984,32 @@ def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
         for bnd in bundles:
             if "shader" not in bnd.lower():
                 raw += unity_clip.load_clips(os.path.join(bundle_deps.ROOT, bnd), {f["clip"] for f in data["facial"]})
+        placed = []
         for f in data["facial"]:
             clip = next((c for c in raw if c.name == f["clip"] and abs(c.stop - c.start - f["stop"]) < 0.05
                          and sum(b["typeID"] == 137 for b in c.bindings) == f["bindings"]), None)
             if clip is None:
                 print(f"    ! facial clip {f['clip']} ({f['stop']:.2f}s) not found in the bundle")
                 continue
+            placed.append((f, clip))
+
+        def weight(f, clip, key, t):          # a clip's value for a channel at timeline t (0 if unbound)
+            bi = next((j for j, b in enumerate(clip.bindings)
+                       if b["typeID"] == 137 and (b["path"], b["attribute"]) == key), None)
+            if bi is None:
+                return 0.0
+            lt = f["clip_in"] + (t - f["start"]) * f["time_scale"]
+            return clip.value(bi, min(max(lt, 0.0), clip.stop - clip.start))[0] / 100.0
+
+        # the face cross-fades between clips with the body (write_merged_clip)
+        timed = sorted((p for p in placed if not p[0]["infinite"]), key=lambda p: p[0]["start"])
+        prev = {id(f): p for p, (f, _) in zip(timed, timed[1:])}
+        for f, clip in placed:
             for bi, b in enumerate(clip.bindings):
                 if b["typeID"] != 137:
                     continue
-                vals = chans.setdefault((b["path"], b["attribute"]), [0.0] * n)
+                key = (b["path"], b["attribute"])
+                vals = chans.setdefault(key, [0.0] * n)
                 for i in range(n):
                     t = i / FPS
                     if f["infinite"]:
@@ -974,7 +1018,26 @@ def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
                         lt = f["clip_in"] + (t - f["start"]) * f["time_scale"]
                     else:
                         continue
-                    vals[i] = clip.value(bi, min(max(lt, 0.0), clip.stop - clip.start))[0] / 100.0
+                    v = clip.value(bi, min(max(lt, 0.0), clip.stop - clip.start))[0] / 100.0
+                    w = (t - f["start"]) / f["blend"] if id(f) in prev and f.get("blend") else 1.0
+                    if w < 1:
+                        v = weight(*prev[id(f)], key, t) * (1 - w) + v * w
+                    vals[i] = v
+        for f, clip in timed:                   # channels only the outgoing clip drives fade out
+            if id(f) not in prev or not f.get("blend"):
+                continue
+            pf, pclip = prev[id(f)]
+            mine = {(b["path"], b["attribute"]) for b in clip.bindings if b["typeID"] == 137}
+            for b in pclip.bindings:
+                key = (b["path"], b["attribute"])
+                if b["typeID"] != 137 or key in mine:
+                    continue
+                vals = chans.setdefault(key, [0.0] * n)
+                for i in range(int(math.ceil(f["start"] * FPS - 1e-6)), n):
+                    w = (i / FPS - f["start"]) / f["blend"]
+                    if w >= 1:
+                        break
+                    vals[i] = weight(pf, pclip, key, i / FPS) * (1 - w)
     vc = voice_cue(skin, data, lang) if lang else None
     lip = extract_voice.lips(vc[0], lang).get(vc[1]) if vc else None
     lip_start = vc[2] if vc else 0.0
@@ -1255,9 +1318,13 @@ def main() -> int:
                 data["sequence"] = name
                 if not data.get("placement") and name in spots:
                     # stage-space cameras, placed by game code: the anchor fit_spots found
-                    x, y, z, yaw = spots[name]
-                    q = [0.0, math.sin(math.radians(yaw) / 2), 0.0, math.cos(math.radians(yaw) / 2)]
-                    data["placement"] = [[[x, y, z], q]] * (int(round(data["duration"] * FPS)) + 1)
+                    # (x, y, z, yaw), or [from t, x, y, z, yaw] per part when she changes spot at a cut
+                    parts = spots[name] if isinstance(spots[name][0], list) else [[0.0] + spots[name]]
+                    data["placement"] = []
+                    for i in range(int(round(data["duration"] * FPS)) + 1):
+                        _, x, y, z, yaw = next((p for p in reversed(parts) if p[0] <= i / FPS + 1e-6), parts[0])
+                        q = [0.0, math.sin(math.radians(yaw) / 2), 0.0, math.cos(math.radians(yaw) / 2)]
+                        data["placement"].append([[x, y, z], q])
                     data["placement_source"] = f"{skin}.spots.json (fitted)"
                 stem = f"{skin}@{name}"
                 sched = data["character_schedule"]

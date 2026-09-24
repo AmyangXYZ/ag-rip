@@ -20,7 +20,9 @@ does not step between them. A sequence whose own placement track already moves h
 (the night debut) is left to it, and its anchor is printed as the check.
 
 The result is read by export_cameras (`<skin>.spots.json` beside the camera JSON):
-a sequence with no placement track of its own takes its spot's anchor.
+a sequence with no placement track of its own takes its spot's anchor. A sequence
+whose look target jumps further than --spot-radius at a cut changes spot there; each
+part is fitted on its own and written as [from t, x, y, z, yaw].
 """
 from __future__ import annotations
 
@@ -148,17 +150,35 @@ def main() -> int:
             continue
         clip = parse_anim(anim)
         resolve_hashed_paths(clip, all_paths)
-        pick = frames[:: max(1, len(frames) // 40)]
-        times = [f["t"] for f in pick]
-        head, face = head_track(clip, chain, paths, times)
-        look = np.array([f["look_at"] for f in pick])
-        cam = np.array([f["position"] for f in pick])
-        r = fit(head, face, look, cam)
-        r["own_placement"] = bool(d.get("placement"))
-        r["look"] = look.mean(axis=0).tolist()
-        r["_head"], r["_look"] = head, look
-        r["_anchor"] = d["placement"][0] if d.get("placement") else None
-        fits[seq] = r
+        # a sequence can move her between spots behind a cut (104903 wedding_touch_102:
+        # 6.7 s at one, the rest 5.5 m away) - the look target jumps; fit each part alone
+        cuts = [i for i in range(1, len(frames))
+                if np.linalg.norm(np.subtract(frames[i]["look_at"], frames[i - 1]["look_at"])) > args.spot_radius]
+        parts = [frames[a:b] for a, b in zip([0] + cuts, cuts + [len(frames)])]
+        for k, part in enumerate(parts, 1):
+            pick = part[:: max(1, len(part) // 40)]
+            times = [f["t"] for f in pick]
+            head, face = head_track(clip, chain, paths, times)
+            if d.get("placement_source"):   # the merged clip already carries a fitted spot: undo it
+                for j, t in enumerate(times):
+                    (p, q) = d["placement"][min(int(round(t * ec.FPS)), len(d["placement"]) - 1)]
+                    inv = np.array([-q[0], -q[1], -q[2], q[3]])
+                    head[j] = qrot(inv, head[j] - np.array(p))
+                    face[j] = qrot(inv, face[j])
+            look = np.array([f["look_at"] for f in pick])
+            cam = np.array([f["position"] for f in pick])
+            r = fit(head, face, look, cam)
+            # she changes spot with the clip change just before the cut (wedding_touch_102: clip
+            # at 6.667 s, cut at 6.767 s), so her pose and her place switch together
+            t0 = part[0]["t"] if k > 1 else 0.0
+            starts = [s["start"] for s in d["character_schedule"] if t0 - 0.5 <= s["start"] <= t0 + 1e-6]
+            r["seq"], r["t0"] = seq, (max(starts) if starts and k > 1 else t0)
+            own = d.get("placement") if not d.get("placement_source") else None   # not a fit's own earlier guess
+            r["own_placement"] = bool(own)
+            r["look"] = look.mean(axis=0).tolist()
+            r["_head"], r["_look"] = head, look
+            r["_anchor"] = own[0] if own else None
+            fits[seq if len(parts) == 1 else f"{seq}#{k}"] = r
 
     # spots: sequences whose look targets sit together
     spots = []
@@ -221,9 +241,22 @@ def main() -> int:
             print(f"    {s:34s} fit ({r['x']:.2f}, {r['y']:.2f}, {r['z']:.2f}) yaw {r['yaw']:.0f}"
                   f"  residual {r['residual']:.2f} m  facing {r['facing']:+.2f}{tag}")
             if not r["own_placement"]:       # every sequence at the spot, not only the ones it was fitted on
-                out[s] = [round(float(xs[0]), 4), round(float(xs[1]), 4), round(float(xs[2]), 4), round(yaw, 2)]
+                anchor = [round(float(xs[0]), 4), round(float(xs[1]), 4), round(float(xs[2]), 4), round(yaw, 2)]
+                if s == r["seq"]:
+                    out[s] = anchor
+                else:                        # a moving sequence: [from t, x, y, z, yaw] per part
+                    out.setdefault(r["seq"], []).append([round(r["t0"], 5)] + anchor)
+    for v in out.values():
+        if isinstance(v[0], list):
+            v.sort()
+    # sequences not fitted this run (--grep, or a merged clip `cams --only` did not rebuild)
+    # keep their spot from the last run
     path = os.path.join(cams, f"{skin}.spots.json")
-    json.dump(out, open(path, "w"), indent=1)
+    fitted = {r["seq"] for r in fits.values()}
+    kept = {k: v for k, v in (json.load(open(path)) if os.path.isfile(path) else {}).items() if k not in fitted}
+    if kept:
+        print(f"kept from the last run: {', '.join(sorted(kept))}")
+    json.dump({**kept, **out}, open(path, "w"), indent=1)
     print(f"-> {path}")
     return 0
 

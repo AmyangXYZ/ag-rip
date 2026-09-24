@@ -8,7 +8,7 @@ its exports into VMD on its own, with nothing but Node.js.
 | | |
 | --- | --- |
 | Source | https://github.com/AmyangXYZ/reze-rig, `scripts/fbx2vmd.ts` + `lib/` |
-| Commit | `c35cbe52c72a37da4fdc4a729ab8ca203e884609` ("Accept --no-foot-ik, as the README and the comment already say") |
+| Commit | `8e4701cb86764340256b5fd367c8270246ca2292` ("Cap how far the eyelid fit may raise a shutting morph") |
 | Bundled with it | `reze-engine` 0.55.2 (VMD writer, PMX loader) |
 | License | MIT, © 2026 Amyang (`LICENSE`, copied from reze-rig) |
 

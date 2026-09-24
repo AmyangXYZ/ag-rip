@@ -1,4 +1,4 @@
-// Bundled from reze-rig (https://github.com/AmyangXYZ/reze-rig, MIT) scripts/fbx2vmd.ts @ c35cbe5. See tools/reze-rig/README.md.
+// Bundled from reze-rig (https://github.com/AmyangXYZ/reze-rig, MIT) scripts/fbx2vmd.ts @ 8e4701c. See tools/reze-rig/README.md.
 
 // scripts/fbx2vmd.ts
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from "node:fs";
@@ -42862,6 +42862,7 @@ function readTargetEyelids(doc) {
   });
   return measureEyelids((i) => doc.vertices[i].position, fields, BLINK_MORPH);
 }
+var MAX_LID_RISE = 2;
 function fitEyelids(byMorph, source, lids, count) {
   const ratio = lids.source.size / lids.target.size;
   for (let f = 0; f < count; f++) {
@@ -42881,7 +42882,7 @@ function fitEyelids(byMorph, source, lids, count) {
         } else rest += values[f] * share;
       }
       if (shut > -1e-6) continue;
-      const k = Math.max(0, Math.min(1 / heaviest, (want - 1 - rest) / shut));
+      const k = Math.max(0, Math.min(1 / heaviest, MAX_LID_RISE, (want - 1 - rest) / shut));
       for (const [morph] of byMorph) {
         if ((lids.target[side].get(morph) ?? 0) < 0) keep.set(morph, Math.max(keep.get(morph) ?? 0, k));
       }
