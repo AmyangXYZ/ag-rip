@@ -1,4 +1,4 @@
-// Bundled from reze-rig (https://github.com/AmyangXYZ/reze-rig, MIT) scripts/fbx2vmd.ts @ 5251fd2. See tools/reze-rig/README.md.
+// Bundled from reze-rig (https://github.com/AmyangXYZ/reze-rig, MIT) scripts/fbx2vmd.ts @ d9b5551. See tools/reze-rig/README.md.
 
 // scripts/fbx2vmd.ts
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from "node:fs";
@@ -42613,8 +42613,8 @@ function shotFov(frames) {
   }
   return held;
 }
-function sceneScale(figureHeight) {
-  return figureHeight ? MMD_FIGURE_HEIGHT / figureHeight : MMD_UNITS_PER_METRE;
+function sceneScale(figureHeight, targetHeight) {
+  return figureHeight ? (targetHeight ?? MMD_FIGURE_HEIGHT) / figureHeight : MMD_UNITS_PER_METRE;
 }
 function cameraToMmd(camera, scale, subject) {
   const keys = [];
@@ -43772,6 +43772,7 @@ function buildFbxCore(clip, opts) {
     const srcHipsY = core.bindWorldPos[hipsIdx][1];
     if (srcHipsY > 1e-4) core.positionScale = targetHipsY / srcHipsY;
   }
+  if (opts?.positionScale) core.positionScale = opts.positionScale;
   const legScale = measureLegScale(core, idxByCanonical, targetPositions);
   if (legScale !== null) {
     for (const t of core.translationExports) {
@@ -44009,6 +44010,13 @@ function measureFigureHeight(clip, opts) {
   const height = head[1] - ankle;
   return height > 0 ? height : null;
 }
+function targetFigureHeight(targetPositions) {
+  const head = targetPositions?.["\u982D"];
+  const ankle = Math.min(targetPositions?.["\u5DE6\u8DB3\u9996"]?.[1] ?? Infinity, targetPositions?.["\u53F3\u8DB3\u9996"]?.[1] ?? Infinity);
+  if (!head || !Number.isFinite(ankle)) return null;
+  const height = head[1] - ankle;
+  return height > 0 ? height : null;
+}
 function depthOf2(c, parentCache, guard = 0) {
   if (guard > 64) return guard;
   const p = parentCache.get(c);
@@ -44168,6 +44176,7 @@ function main() {
   }
   if (outDir) mkdirSync(outDir, { recursive: true });
   const writer = new VMDWriter();
+  const targetHeight = targetFigureHeight(targetPositions);
   const figureOf = (cameraFile) => {
     const none = { height: null, at: null, from: null };
     if (!/\.camera\.fbx$/i.test(cameraFile)) return none;
@@ -44193,7 +44202,7 @@ function main() {
       const camera = readCameraFbx(buffer);
       if (camera) {
         const figure = figureOf(file);
-        const scale = sceneScale(figure.height);
+        const scale = sceneScale(figure.height, targetHeight);
         const at = figure.at;
         const subject = at ? (t) => at(t).map((v) => v * scale) : void 0;
         const vmd2 = writer.writeCamera(cameraToMmd(camera, scale, subject));
@@ -44207,7 +44216,11 @@ function main() {
       const clips = parseFbxToAnimationClips(buffer);
       if (clips.length === 0) throw new Error("no animation clips");
       if (clips.length > 1) console.warn(`${name}: ${clips.length} clips, converting the first`);
-      const [mmd] = retargetClips([clips[0]], { targetPositions, bindReference, inPlace, footIK });
+      const shot = /\.character\.fbx$/i.test(file) ? file.replace(/\.character\.fbx$/i, ".camera.fbx") : null;
+      const inScene = shot !== null && (files.some((f) => basename(f).toLowerCase() === basename(shot).toLowerCase()) || existsSync(shot));
+      const figureHeight = inScene ? measureFigureHeight(clips[0]) : null;
+      const positionScale = figureHeight ? sceneScale(figureHeight, targetHeight) : void 0;
+      const [mmd] = retargetClips([clips[0]], { targetPositions, bindReference, inPlace, footIK, positionScale });
       const morphSource = readMorphTracks(buffer);
       const sourceEyelids = morphSource.length && targetEyelids ? readSourceEyelids(buffer) : null;
       const lids = sourceEyelids && targetEyelids ? { source: sourceEyelids, target: targetEyelids } : void 0;
@@ -44216,7 +44229,7 @@ function main() {
       const outPath = join(outDir ?? join(file, ".."), `${name}.vmd`);
       writeFileSync(outPath, Buffer.from(vmd));
       console.log(
-        `${name}.vmd  (${(vmd.byteLength / 1024).toFixed(0)} KB` + (morphSource.length ? `, ${morphTracks.size} morphs from ${morphSource.length - unmapped.length}/${morphSource.length} channels` + (lids ? `, eyes fitted \xD7${(lids.source.size / lids.target.size).toFixed(2)}` : "") + (unmapped.length ? `, unmapped: ${unmapped.join(" ")}` : "") : "") + ")"
+        `${name}.vmd  (${(vmd.byteLength / 1024).toFixed(0)} KB` + (positionScale ? `, travel \xD7${positionScale.toFixed(3)} (scene)` : "") + (morphSource.length ? `, ${morphTracks.size} morphs from ${morphSource.length - unmapped.length}/${morphSource.length} channels` + (lids ? `, eyes fitted \xD7${(lids.source.size / lids.target.size).toFixed(2)}` : "") + (unmapped.length ? `, unmapped: ${unmapped.join(" ")}` : "") : "") + ")"
       );
       ok++;
     } catch (e) {
