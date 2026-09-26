@@ -1,4 +1,4 @@
-// Bundled from reze-rig (https://github.com/AmyangXYZ/reze-rig, MIT) scripts/fbx2vmd.ts @ 8e4701c. See tools/reze-rig/README.md.
+// Bundled from reze-rig (https://github.com/AmyangXYZ/reze-rig, MIT) scripts/fbx2vmd.ts @ 5251fd2. See tools/reze-rig/README.md.
 
 // scripts/fbx2vmd.ts
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from "node:fs";
@@ -42599,7 +42599,8 @@ function shotFov(frames) {
     const f1 = frames[i].forward;
     const dot = Math.max(-1, Math.min(1, f0[0] * f1[0] + f0[1] * f1[1] + f0[2] * f1[2]));
     const turn = Math.acos(dot) / DEG;
-    return turn > CUT_TURN_DEG || typical > 0 && moves[i - 1] > typical * CUT_MOVE_RATIO;
+    const around = Math.max(typical, Math.min(moves[i - 2] ?? Infinity, moves[i] ?? Infinity));
+    return turn > CUT_TURN_DEG || around > 0 && around < Infinity && moves[i - 1] > around * CUT_MOVE_RATIO;
   };
   const held = new Array(n);
   let start = 0;

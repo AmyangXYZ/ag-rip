@@ -22,7 +22,9 @@ does not step between them. A sequence whose own placement track already moves h
 The result is read by export_cameras (`<skin>.spots.json` beside the camera JSON):
 a sequence with no placement track of its own takes its spot's anchor. A sequence
 whose look target jumps further than --spot-radius at a cut changes spot there; each
-part is fitted on its own and written as [from t, x, y, z, yaw].
+part is fitted on its own and written as [from t, x, y, z, yaw]. A sequence whose look
+target stays within --origin-radius of the origin films her where she stands (character
+space, like most skins) and is left out.
 """
 from __future__ import annotations
 
@@ -121,6 +123,8 @@ def main() -> int:
     ap.add_argument("--spot-radius", type=float, default=1.5, help="look targets this close share a spot (m)")
     ap.add_argument("--max-residual", type=float, default=0.4,
                     help="a sequence the look target leaves further than this (m) is a walk, not a spot: left unplaced")
+    ap.add_argument("--origin-radius", type=float, default=1.0,
+                    help="a sequence whose look target stays this close to the origin (m) is in character space")
     args = ap.parse_args()
     skin, cid = args.skin, args.skin[:4]
     cams = os.path.join(ec.ANIM_OUT, cid, "cameras")
@@ -137,7 +141,7 @@ def main() -> int:
         if acc:
             all_paths.add("/".join(reversed(acc)))
 
-    fits = {}
+    fits, origin = {}, set()
     for js in sorted(glob.glob(os.path.join(cams, f"{skin}@*.camera.json"))):
         stem = os.path.basename(js)[:-len(".camera.json")]
         seq = stem.split("@", 1)[1]
@@ -147,6 +151,13 @@ def main() -> int:
         anim = os.path.join(merged, f"{stem}.anim")
         frames = [f for f in d["frames"] if f.get("look_at")]
         if not frames or not os.path.isfile(anim):
+            continue
+        # a look target that never leaves the timeline root is filming her where she
+        # stands, in character space (128402's home-scene debut / touch1 / touch2 beside
+        # its wedding-stage sequences): nothing to place
+        if max(math.hypot(f["look_at"][0], f["look_at"][2]) for f in frames) < args.origin_radius:
+            print(f"{seq}: look target within {args.origin_radius} m of the origin - character space, left unplaced")
+            origin.add(seq)
             continue
         clip = parse_anim(anim)
         resolve_hashed_paths(clip, all_paths)
@@ -253,7 +264,7 @@ def main() -> int:
     # keep their spot from the last run
     path = os.path.join(cams, f"{skin}.spots.json")
     fitted = {r["seq"] for r in fits.values()}
-    kept = {k: v for k, v in (json.load(open(path)) if os.path.isfile(path) else {}).items() if k not in fitted}
+    kept = {k: v for k, v in (json.load(open(path)) if os.path.isfile(path) else {}).items() if k not in fitted | origin}
     if kept:
         print(f"kept from the last run: {', '.join(sorted(kept))}")
     json.dump({**kept, **out}, open(path, "w"), indent=1)
