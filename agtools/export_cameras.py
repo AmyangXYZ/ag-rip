@@ -1188,14 +1188,28 @@ def run_in_blender(payload: str) -> None:
         if node.parent is not None:
             by_name.setdefault(node.name, node)
     U, B = [], []
+    # the body skeleton only: prop rigs travel with the model on their own terms (108901ui's
+    # weapon Bone_Box00-04 sit 1.5 m off the prefab and stretched the fit 0.016 / 0.010 / 0.006)
+    body = any(b.name.startswith("Bip001") for b in arm.data.bones)
     for bone in arm.data.bones:
         node = by_name.get(bone.name)
-        if node is not None:
+        if node is not None and (not body or bone.name.startswith("Bip001")):
             U.append(uworld(node)[:3, 3])
             B.append(np.array(arm.matrix_world @ bone.head_local))
     U, B = np.array(U), np.array(B)
     X = np.hstack([U, np.ones((len(U), 1))])
     sol, *_ = np.linalg.lstsq(X, B, rcond=None)
+    # a bone the model FBX carries elsewhere than the prefab (108901ui: residual 1.4e-2 against
+    # 1e-8 on every other rig) bends the whole fit, and with it every camera: drop such bones
+    # and fit again on the ones that agree
+    for _ in range(3):
+        err = np.linalg.norm(X @ sol - B, axis=1)
+        keep = err <= max(1e-6, 20 * np.median(err))
+        if keep.all():
+            break
+        print(f"CAMS fit: {int((~keep).sum())} bone(s) off the prefab dropped")
+        X, B = X[keep], B[keep]
+        sol, *_ = np.linalg.lstsq(X, B, rcond=None)
     A, t = sol[:3].T, sol[3]
     sv = np.linalg.svd(A, compute_uv=False)
     print(f"CAMS fit on {os.path.basename(job['model'])}: {len(U)} bones, "
