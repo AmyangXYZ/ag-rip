@@ -1,4 +1,4 @@
-// Bundled from reze-rig (https://github.com/AmyangXYZ/reze-rig, MIT) scripts/fbx2vmd.ts @ d9b5551. See tools/reze-rig/README.md.
+// Bundled from reze-rig (https://github.com/AmyangXYZ/reze-rig, MIT) scripts/fbx2vmd.ts @ c4017ee. See tools/reze-rig/README.md.
 
 // scripts/fbx2vmd.ts
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from "node:fs";
@@ -44124,6 +44124,7 @@ function main() {
   let bindRefPath = null;
   let noBindRef = false;
   let targetPmxPath = null;
+  let fixedScale = null;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--out") outDir = args[++i];
     else if (args[i] === "--in-place") inPlace = true;
@@ -44132,11 +44133,16 @@ function main() {
     else if (args[i] === "--no-foot-ik") footIK = false;
     else if (args[i] === "--bind-ref") bindRefPath = args[++i];
     else if (args[i] === "--target-pmx") targetPmxPath = args[++i];
+    else if (args[i] === "--scene-scale") fixedScale = Number(args[++i]);
     else inputs.push(args[i]);
+  }
+  if (fixedScale !== null && !(fixedScale > 0)) {
+    console.error("--scene-scale needs a positive number (PMX units per source unit)");
+    process.exit(1);
   }
   if (inputs.length === 0) {
     console.error(
-      "usage: fbx2vmd <files-or-dirs...> [--out <dir>] [--target-pmx <model.pmx>] [--in-place] [--no-foot-ik] [--bind-ref <idle.fbx>]"
+      "usage: fbx2vmd <files-or-dirs...> [--out <dir>] [--target-pmx <model.pmx>] [--in-place] [--no-foot-ik] [--bind-ref <idle.fbx>] [--scene-scale <N>]"
     );
     process.exit(1);
   }
@@ -44202,7 +44208,7 @@ function main() {
       const camera = readCameraFbx(buffer);
       if (camera) {
         const figure = figureOf(file);
-        const scale = sceneScale(figure.height, targetHeight);
+        const scale = fixedScale ?? sceneScale(figure.height, targetHeight);
         const at = figure.at;
         const subject = at ? (t) => at(t).map((v) => v * scale) : void 0;
         const vmd2 = writer.writeCamera(cameraToMmd(camera, scale, subject));
@@ -44219,7 +44225,7 @@ function main() {
       const shot = /\.character\.fbx$/i.test(file) ? file.replace(/\.character\.fbx$/i, ".camera.fbx") : null;
       const inScene = shot !== null && (files.some((f) => basename(f).toLowerCase() === basename(shot).toLowerCase()) || existsSync(shot));
       const figureHeight = inScene ? measureFigureHeight(clips[0]) : null;
-      const positionScale = figureHeight ? sceneScale(figureHeight, targetHeight) : void 0;
+      const positionScale = fixedScale ?? (figureHeight ? sceneScale(figureHeight, targetHeight) : void 0);
       const [mmd] = retargetClips([clips[0]], { targetPositions, bindReference, inPlace, footIK, positionScale });
       const morphSource = readMorphTracks(buffer);
       const sourceEyelids = morphSource.length && targetEyelids ? readSourceEyelids(buffer) : null;
@@ -44229,7 +44235,7 @@ function main() {
       const outPath = join(outDir ?? join(file, ".."), `${name}.vmd`);
       writeFileSync(outPath, Buffer.from(vmd));
       console.log(
-        `${name}.vmd  (${(vmd.byteLength / 1024).toFixed(0)} KB` + (positionScale ? `, travel \xD7${positionScale.toFixed(3)} (scene)` : "") + (morphSource.length ? `, ${morphTracks.size} morphs from ${morphSource.length - unmapped.length}/${morphSource.length} channels` + (lids ? `, eyes fitted \xD7${(lids.source.size / lids.target.size).toFixed(2)}` : "") + (unmapped.length ? `, unmapped: ${unmapped.join(" ")}` : "") : "") + ")"
+        `${name}.vmd  (${(vmd.byteLength / 1024).toFixed(0)} KB` + (positionScale ? `, travel \xD7${positionScale.toFixed(3)} (${fixedScale ? "--scene-scale" : "scene"})` : "") + (morphSource.length ? `, ${morphTracks.size} morphs from ${morphSource.length - unmapped.length}/${morphSource.length} channels` + (lids ? `, eyes fitted \xD7${(lids.source.size / lids.target.size).toFixed(2)}` : "") + (unmapped.length ? `, unmapped: ${unmapped.join(" ")}` : "") : "") + ")"
       );
       ok++;
     } catch (e) {

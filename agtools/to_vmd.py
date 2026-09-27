@@ -14,14 +14,15 @@ whose timeline camera is disabled - it stays on the home camera - has no .camera
   <skin>.scene.json                            the scene's scale, for putting the stage under them
 into AG_dlc_scene/<skin>/ (e.g. AG_dlc_scene/109501/). Everything starts at frame 0.
 
-ONE SCALE. Camera, her travel and where the sequence stands her are all in game units
-(Unity, timeline root = stage origin) times one factor W = the target model's height /
-the heroine's (ankle to head bone): the model stands in for her at her size. The stage
-must be scaled by the same W, or everything parts in proportion to its distance from
-the origin (128402's wedding spot is 30 units out, 104903's 85). reze-design builds its
-stages at 8 PMX units per game unit (0.64 m x 12.5), so its stage scale is W / 8, at
-position 0 - both in <skin>.scene.json. Axes agree already: game (x, y, z) -> PMX
-(-x, y, -z) on both sides.
+ONE SCALE: 8 PMX units per game unit. The game's animations, cameras and stages share
+one Unity world (timeline root = stage origin), and reze-design builds its stages at 8
+PMX per unit (0.64 m x 12.5). So the camera and her travel go at 8 too (fbx2vmd
+--scene-scale 8), not at the retarget's hip ratio (~9.1 on reze) or the figure ratio
+(~8.5): any mismatch parts them in proportion to the distance from the origin
+(128402's wedding spot is 30 units out, 104903's 85), metres at those spots. The stage
+loads as built: scale 1, position 0. Axes agree: game (x, y, z) -> PMX (-x, y, -z) on
+both sides. The model keeps its own size - reze stands 5-7% taller than the heroine at
+8 - so the game's shots, aimed at the heroine's head, frame reze's a little high.
 
 The converter is reze-rig's scripts/fbx2vmd.ts (https://github.com/AmyangXYZ/reze-rig,
 MIT), vendored as a bundle in tools/reze-rig/ - see its README. Needs Node.js.
@@ -40,7 +41,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 FBX2VMD = os.path.join(ROOT, "tools", "reze-rig", "fbx2vmd.mjs")
-STAGE_PMX_PER_UNIT = 8.0       # reze-design tools/stages: 1 game unit = 0.64 m, 12.5 PMX per metre
+SCENE_SCALE = 8.0              # PMX per game unit; reze-design tools/stages: 1 unit = 0.64 m, 12.5 PMX per metre
 
 
 def stage_of(skin: str) -> str | None:
@@ -86,7 +87,7 @@ def main() -> int:
             if not os.path.isfile(cam) and os.path.isfile(stale):
                 os.remove(stale)             # no camera of its own (disabled vcam: home camera)
             r = subprocess.run(["node", FBX2VMD, *inputs, "--out", out, "--target-pmx", args.target_pmx,
-                                "--no-bind-ref"] + ([] if args.foot_ik else ["--no-foot-ik"]),
+                                "--no-bind-ref", "--scene-scale", str(SCENE_SCALE)] + ([] if args.foot_ik else ["--no-foot-ik"]),
                                capture_output=True, text=True, encoding="utf-8", errors="replace")
             for line in r.stdout.splitlines():
                 if line.endswith(".vmd") or ".vmd  (" in line:
@@ -109,7 +110,7 @@ def main() -> int:
                 "skin": skin,
                 "stage": stage_of(skin),
                 "pmx_per_game_unit": w,
-                "reze_design_stage": {"scale": round(w / STAGE_PMX_PER_UNIT, 4), "position": [0, 0, 0],
+                "reze_design_stage": {"scale": round(w / SCENE_SCALE, 4), "position": [0, 0, 0],
                                       "rotation": [0, 0, 0]},
                 "target_pmx": os.path.basename(args.target_pmx),
                 "note": "camera VMDs, her travel and her placement are game units x pmx_per_game_unit "
@@ -117,7 +118,7 @@ def main() -> int:
                         "lines up at reze_design_stage.scale about the origin",
             }
             json.dump(scene, open(os.path.join(out, f"{skin}.scene.json"), "w", encoding="utf-8"), indent=1)
-            print(f"{skin}: scene x{w:.3f} PMX per game unit -> stage scale {w / STAGE_PMX_PER_UNIT:.4f}"
+            print(f"{skin}: scene x{w:.3f} PMX per game unit -> stage scale {w / SCENE_SCALE:.4f}"
                   f" ({skin}.scene.json)")
     return 0
 
