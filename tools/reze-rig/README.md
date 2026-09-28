@@ -8,7 +8,7 @@ its exports into VMD on its own, with nothing but Node.js.
 | | |
 | --- | --- |
 | Source | https://github.com/AmyangXYZ/reze-rig, `scripts/fbx2vmd.ts` + `lib/` |
-| Commit | `c4017ee0ddffadd5074d60335e15fd9626f7ec23` ("fbx2vmd --scene-scale N: a source world of known size"; branch `fov-slow-dolly` on `8e4701c`) |
+| Commit | `c4f1572` ("Camera fov: follow the source's angle with hysteresis, not one median per shot"; branch `fov-slow-dolly` on `8e4701c`) |
 | Bundled with it | `reze-engine` 0.55.2 (VMD writer, PMX loader) |
 | License | MIT, © 2026 Amyang (`LICENSE`, copied from reze-rig) |
 
