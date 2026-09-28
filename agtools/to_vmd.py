@@ -5,14 +5,15 @@ r"""Camera sequences -> MMD VMD (motion + morphs, camera) with reze-rig's fbx2vm
     python ag.py vmd 109501 --only touch1,debut --target-pmx <model.pmx>
 
 For each <skin>@<seq> in AG_fbx_anim/<cid>/cameras/ (written by `ag.py cams`; a sequence
-whose timeline camera is disabled - it stays on the home camera - has no .camera.*):
-  <seq>.character.fbx -> <seq>.character.vmd   body retargeted onto the target model (FK, no
-                                               foot IK - see --foot-ik; root motion kept),
-                                               facial / lip morphs as MMD morphs
-  <seq>.camera.fbx    -> <seq>.camera.vmd      the sequence's camera, sized by the character
-  <seq>.wav           -> <seq>.mixed.zh.wav     voice + scene music, one track
-  <skin>.scene.json                            the scene's scale, for putting the stage under them
-into AG_dlc_scene/<skin>/ (e.g. AG_dlc_scene/109501/). Everything starts at frame 0.
+whose timeline camera is disabled - it stays on the home camera - has no .camera.*), one
+folder AG_dlc_scene/<skin>/<seq>/ (e.g. AG_dlc_scene/109502/touch1_action1_1/):
+  <seq>.character.fbx -> character.vmd   body retargeted onto the target model (FK, no
+                                         foot IK - see --foot-ik; root motion kept),
+                                         facial / lip morphs as MMD morphs
+  <seq>.camera.fbx    -> camera.vmd      the sequence's camera, sized by the character
+  <seq>.wav           -> audio.wav       voice (zh) + scene music, one track
+and nothing loose beside them. Everything starts at frame 0; the stage loads as built (scale
+1, position 0, see ONE SCALE).
 
 ONE SCALE: 8 PMX units per game unit. The game's animations, cameras and stages share
 one Unity world (timeline root = stage origin), and reze-design builds its stages at 8
@@ -31,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 import glob
-import json
 import os
 import re
 import shutil
@@ -42,14 +42,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 FBX2VMD = os.path.join(ROOT, "tools", "reze-rig", "fbx2vmd.mjs")
 SCENE_SCALE = 8.0              # PMX per game unit; reze-design tools/stages: 1 unit = 0.64 m, 12.5 PMX per metre
-
-
-def stage_of(skin: str) -> str | None:
-    try:
-        cat = json.load(open(os.path.join(ROOT, "AG_stage_names", "catalog.json"), encoding="utf-8"))
-        return cat["dlc"].get(skin, {}).get("stage") or None
-    except (OSError, KeyError, ValueError):
-        return None
 
 
 def main() -> int:
@@ -83,10 +75,12 @@ def main() -> int:
                 continue
             cam = os.path.join(src, f"{stem}.camera.fbx")
             inputs = [p for p in (char, cam) if os.path.isfile(p)]
-            stale = os.path.join(out, f"{stem}.camera.vmd")
+            folder = os.path.join(out, seq)
+            os.makedirs(folder, exist_ok=True)
+            stale = os.path.join(folder, "camera.vmd")
             if not os.path.isfile(cam) and os.path.isfile(stale):
                 os.remove(stale)             # no camera of its own (disabled vcam: home camera)
-            r = subprocess.run(["node", FBX2VMD, *inputs, "--out", out, "--target-pmx", args.target_pmx,
+            r = subprocess.run(["node", FBX2VMD, *inputs, "--out", folder, "--target-pmx", args.target_pmx,
                                 "--no-bind-ref", "--scene-scale", str(SCENE_SCALE)] + ([] if args.foot_ik else ["--no-foot-ik"]),
                                capture_output=True, text=True, encoding="utf-8", errors="replace")
             for line in r.stdout.splitlines():
@@ -98,28 +92,16 @@ def main() -> int:
             if r.returncode:
                 print(f"  ! {stem}: fbx2vmd failed\n{r.stderr.strip()[-600:]}")
                 continue
+            for part in ("character", "camera"):     # fbx2vmd names them after the stem
+                made = os.path.join(folder, f"{stem}.{part}.vmd")
+                if os.path.isfile(made):
+                    os.replace(made, os.path.join(folder, f"{part}.vmd"))
             wav = os.path.join(src, f"{stem}.wav")
             if os.path.isfile(wav):
-                shutil.copyfile(wav, os.path.join(out, f"{stem}.mixed.zh.wav"))
-            print(f"{stem} -> {out}")
-        if scales and not only:
-            if max(scales) - min(scales) > 1e-3:
-                print(f"  ! {skin}: the sequences disagree on the scene scale: {sorted(scales)}")
-            w = sorted(scales)[len(scales) // 2]
-            scene = {
-                "skin": skin,
-                "stage": stage_of(skin),
-                "pmx_per_game_unit": w,
-                "reze_design_stage": {"scale": round(w / SCENE_SCALE, 4), "position": [0, 0, 0],
-                                      "rotation": [0, 0, 0]},
-                "target_pmx": os.path.basename(args.target_pmx),
-                "note": "camera VMDs, her travel and her placement are game units x pmx_per_game_unit "
-                        "(game (x, y, z) -> PMX (-x, y, -z)); a reze-design stage (8 PMX per game unit) "
-                        "lines up at reze_design_stage.scale about the origin",
-            }
-            json.dump(scene, open(os.path.join(out, f"{skin}.scene.json"), "w", encoding="utf-8"), indent=1)
-            print(f"{skin}: scene x{w:.3f} PMX per game unit -> stage scale {w / SCENE_SCALE:.4f}"
-                  f" ({skin}.scene.json)")
+                shutil.copyfile(wav, os.path.join(folder, "audio.wav"))
+            print(f"{stem} -> {folder}")
+        if scales and max(scales) - min(scales) > 1e-3:
+            print(f"  ! {skin}: the sequences disagree on the scene scale: {sorted(scales)}")
     return 0
 
 

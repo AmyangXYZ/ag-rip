@@ -77,7 +77,14 @@ def decode(sheet: str, lang: str | None, out_root: str = OUT) -> dict[str, str]:
     r = subprocess.run([VGM, "-S", "0", "-o", os.path.join(out, "?n.wav"), src], capture_output=True, text=True)
     if r.returncode:
         print(f"  ! vgmstream {sheet} ({lang}): {r.stderr.strip()[:200]}")
-    return {os.path.splitext(f)[0]: os.path.join(out, f) for f in os.listdir(out) if f.endswith(".wav")}
+    # a waveform several cues share comes out named after all of them, "; "-joined
+    # ("skin_v_getvideo_109502_get; v_s_109502_greet_day"): each name finds it
+    got = {}
+    for f in os.listdir(out):
+        if f.endswith(".wav"):
+            for name in os.path.splitext(f)[0].split("; "):
+                got.setdefault(name, os.path.join(out, f))
+    return got
 
 
 _lips_cache: dict[str, dict] = {}

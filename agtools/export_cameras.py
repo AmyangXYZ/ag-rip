@@ -941,6 +941,11 @@ def voice_cue(skin: str, data: dict, lang: str | None) -> tuple[str, str, float]
     sheet = f"vo_sys_{skin}"
     known = set(extract_voice.lips(sheet, lang or "zh"))
     seq = data["sequence"]
+    # the game's own pairing (game_config.voices: its interaction configs), first take
+    import game_config
+    cue = next((c for c in game_config.voices(skin).get(seq, []) if c in known), None)
+    if cue:
+        return sheet, cue, 0.0
     m = re.fullmatch(r"touch(\d+)", seq)
     names = [f"talk{m.group(1)}"] if m else []
     m = re.fullmatch(r"debut(\d*)", seq)
