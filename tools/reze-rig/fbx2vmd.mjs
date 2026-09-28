@@ -42602,18 +42602,20 @@ function shotFov(frames) {
     return turn > CUT_TURN_DEG || around > 0 && around < Infinity && moves[i - 1] > around * CUT_MOVE_RATIO;
   };
   const held = new Array(n);
+  const cuts = new Array(n).fill(false);
   for (let i = 0; i < n; i++) {
     const src = frames[i].fovY;
-    held[i] = i === 0 || cut(i) || Math.abs(src - held[i - 1]) > FOV_HYSTERESIS_DEG ? Math.max(1, Math.round(src)) : held[i - 1];
+    cuts[i] = i > 0 && cut(i);
+    held[i] = i === 0 || cuts[i] || Math.abs(src - held[i - 1]) > FOV_HYSTERESIS_DEG ? Math.max(1, Math.round(src)) : held[i - 1];
   }
-  return held;
+  return { held, cuts };
 }
 function sceneScale(figureHeight, targetHeight) {
   return figureHeight ? (targetHeight ?? MMD_FIGURE_HEIGHT) / figureHeight : MMD_UNITS_PER_METRE;
 }
 function cameraToMmd(camera, scale, subject) {
-  const keys = [];
-  const heldFov = shotFov(camera.frames);
+  const { held, cuts } = shotFov(camera.frames);
+  const shots = [];
   let yaw = 0;
   let roll = 0;
   camera.frames.forEach((frame, i) => {
@@ -42627,17 +42629,145 @@ function cameraToMmd(camera, scale, subject) {
     yaw = i === 0 ? Math.atan2(forward[0], forward[2]) : unwrap(Math.atan2(forward[0], forward[2]), yaw);
     roll = i === 0 ? Math.atan2(right[1], up[1]) : unwrap(Math.atan2(right[1], up[1]), roll);
     const reach = Math.max(1, subject ? depthOf(subject(i / FPS3), eye, forward) : axisDepth(eye, forward));
-    const fov = heldFov[i];
-    const back = reach * Math.tan(frame.fovY * DEG / 2) / Math.tan(fov * DEG / 2);
-    keys.push({
-      frame: i,
-      distance: -back,
-      target: new Vec3(eye[0] + forward[0] * reach, eye[1] + forward[1] * reach, eye[2] + forward[2] * reach),
-      rotation: new Vec3(-pitch, -yaw, -roll),
-      fov
+    shots.push({
+      target: [eye[0] + forward[0] * reach, eye[1] + forward[1] * reach, eye[2] + forward[2] * reach],
+      rotation: [-pitch, -yaw, -roll],
+      reach,
+      fovY: frame.fovY
     });
   });
+  return sparseKeys(shots, held, cuts);
+}
+var KEY_MAX_SPAN = 30;
+var KEY_EYE_TOL = 6e-3;
+var KEY_TURN_TOL_DEG = 0.15;
+var KEY_FOV_TOL_DEG = 1;
+var LINEAR = [20, 107, 20, 107];
+function keyAt(s, frame, fov) {
+  const back = s.reach * Math.tan(s.fovY * DEG / 2) / Math.tan(fov * DEG / 2);
+  return {
+    frame,
+    distance: -back,
+    target: new Vec3(s.target[0], s.target[1], s.target[2]),
+    rotation: new Vec3(s.rotation[0], s.rotation[1], s.rotation[2]),
+    fov
+  };
+}
+function viewOf(r) {
+  const p = -r[0];
+  const y = -r[1];
+  const z = -r[2];
+  const cp = Math.cos(p), sp = Math.sin(p), cy = Math.cos(y), sy = Math.sin(y), cz = Math.cos(z), sz = Math.sin(z);
+  return [
+    [cp * sy, -sp, cp * cy],
+    [-sz * cy + cz * sp * sy, cz * cp, sz * sy + cz * sp * cy]
+  ];
+}
+function bezier(b, t) {
+  const x1 = b[0] / 127, x2 = b[1] / 127, y1 = b[2] / 127, y2 = b[3] / 127;
+  let lo = 0;
+  let hi = 1;
+  let m = 0.5;
+  for (let k = 0; k < 15; k++) {
+    const x = 3 * (1 - m) * (1 - m) * m * x1 + 3 * (1 - m) * m * m * x2 + m * m * m;
+    if (Math.abs(x - t) < 1e-4) break;
+    if (x < t) lo = m;
+    else hi = m;
+    m = (lo + hi) / 2;
+  }
+  return 3 * (1 - m) * (1 - m) * m * y1 + 3 * (1 - m) * m * m * y2 + m * m * m;
+}
+var CURVE_GRID = [0, 32, 64, 96, 127];
+function fitCurve(series) {
+  const n = series[0].length - 1;
+  const rows = series.filter((v) => Math.abs(v[n] - v[0]) > 1e-9);
+  if (!rows.length || n < 2) return LINEAR;
+  let best = LINEAR;
+  let bestErr = Infinity;
+  for (const x1 of CURVE_GRID)
+    for (const x2 of CURVE_GRID)
+      for (const y1 of CURVE_GRID)
+        for (const y2 of CURVE_GRID) {
+          const b = [x1, x2, y1, y2];
+          let err3 = 0;
+          for (let k = 1; k < n && err3 < bestErr; k++) {
+            const w = bezier(b, k / n);
+            for (const v of rows) err3 += (v[0] + (v[n] - v[0]) * w - v[k]) ** 2;
+          }
+          if (err3 < bestErr) {
+            bestErr = err3;
+            best = b;
+          }
+        }
+  return best;
+}
+function sparseKeys(shots, held, cuts) {
+  const n = shots.length;
+  const keys = [keyAt(shots[0], 0, held[0])];
+  let a = 0;
+  while (a < n - 1) {
+    let next = keyAt(shots[a + 1], a + 1, held[a + 1]);
+    if (!cuts[a + 1]) {
+      for (let b = a + 2; b < n && b - a <= KEY_MAX_SPAN && !cuts[b]; b++) {
+        const k = segment(keys[keys.length - 1], shots, a, b, held[b]);
+        if (!k) break;
+        next = k;
+      }
+    }
+    keys.push(next);
+    a = next.frame;
+  }
   return keys;
+}
+function segment(A, shots, a, b, fovB) {
+  const B = keyAt(shots[b], b, fovB);
+  const span = b - a;
+  for (let k = 1; k < span; k++) {
+    if (Math.abs(A.fov + (fovB - A.fov) * k / span - shots[a + k].fovY) > KEY_FOV_TOL_DEG) return null;
+  }
+  const ideal = shots.slice(a, b + 1).map((s, k) => keyAt(s, a + k, A.fov + (B.fov - A.fov) * k / span));
+  const w = (ip2, c, u) => bezier(ip2.slice(c * 4, c * 4 + 4), u);
+  const eye = (t, f, d) => [t[0] + f[0] * d, t[1] + f[1] * d, t[2] + f[2] * d];
+  const turn = Math.cos(KEY_TURN_TOL_DEG * DEG);
+  const holds = (ip2) => {
+    for (let k = 1; k < span; k++) {
+      const u = k / span;
+      const want = ideal[k];
+      const t = [
+        A.target.x + (B.target.x - A.target.x) * w(ip2, 0, u),
+        A.target.y + (B.target.y - A.target.y) * w(ip2, 1, u),
+        A.target.z + (B.target.z - A.target.z) * w(ip2, 2, u)
+      ];
+      const wr = w(ip2, 3, u);
+      const r = [
+        A.rotation.x + (B.rotation.x - A.rotation.x) * wr,
+        A.rotation.y + (B.rotation.y - A.rotation.y) * wr,
+        A.rotation.z + (B.rotation.z - A.rotation.z) * wr
+      ];
+      const d = A.distance + (B.distance - A.distance) * w(ip2, 4, u);
+      const [f, up] = viewOf(r);
+      const [wf, wu] = viewOf([want.rotation.x, want.rotation.y, want.rotation.z]);
+      const e = eye(t, f, d);
+      const we = eye([want.target.x, want.target.y, want.target.z], wf, want.distance);
+      if (Math.hypot(e[0] - we[0], e[1] - we[1], e[2] - we[2]) > KEY_EYE_TOL * Math.abs(want.distance)) return false;
+      if (f[0] * wf[0] + f[1] * wf[1] + f[2] * wf[2] < turn) return false;
+      if (up[0] * wu[0] + up[1] * wu[1] + up[2] * wu[2] < turn) return false;
+    }
+    return true;
+  };
+  const linear = [...LINEAR, ...LINEAR, ...LINEAR, ...LINEAR, ...LINEAR, ...LINEAR];
+  if (holds(linear)) return B;
+  const of = (f) => ideal.map(f);
+  const ip = [
+    ...fitCurve([of((k) => k.target.x)]),
+    ...fitCurve([of((k) => k.target.y)]),
+    ...fitCurve([of((k) => k.target.z)]),
+    ...fitCurve([of((k) => k.rotation.x), of((k) => k.rotation.y), of((k) => k.rotation.z)]),
+    ...fitCurve([of((k) => k.distance)]),
+    ...LINEAR
+  ];
+  if (!holds(ip)) return null;
+  return { ...B, interpolation: new Uint8Array(ip) };
 }
 
 // lib/fbx-morph.ts
@@ -44029,7 +44159,7 @@ function reportOnce(clip, core, trackByCanonical, frameFixDeg = 0, opts, bindFro
 }
 
 // lib/engine-clip.ts
-var LINEAR = {
+var LINEAR2 = {
   rotation: [{ x: 20, y: 20 }, { x: 107, y: 107 }],
   translationX: [{ x: 20, y: 20 }, { x: 107, y: 107 }],
   translationY: [{ x: 20, y: 20 }, { x: 107, y: 107 }],
@@ -44053,7 +44183,7 @@ function toEngineClip(clip, fps = 30, morphTracks = /* @__PURE__ */ new Map()) {
         frame,
         rotation: new Quat(q.x, q.y, q.z, q.w),
         translation: p ? new Vec3(p.x, p.y, p.z) : new Vec3(0, 0, 0),
-        interpolation: LINEAR
+        interpolation: LINEAR2
       });
       if (frame + 1 > frameCount) frameCount = frame + 1;
     }
@@ -44070,7 +44200,7 @@ function toEngineClip(clip, fps = 30, morphTracks = /* @__PURE__ */ new Map()) {
         frame,
         rotation: new Quat(0, 0, 0, 1),
         translation: new Vec3(p.x, p.y, p.z),
-        interpolation: LINEAR
+        interpolation: LINEAR2
       });
       if (frame + 1 > frameCount) frameCount = frame + 1;
     }
