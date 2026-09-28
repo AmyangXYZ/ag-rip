@@ -605,8 +605,9 @@ def _sequence_data(proj: Project, prefab: str, playable: str, tracks: list[dict]
                    frames: list[dict], camera: dict) -> dict:
     """Everything but the camera: character clip schedule, facial clips, audio cues, cuts."""
     # the character's own track ("@103401ui/103401ui_tpose"); other "<name>_tpose" tracks
-    # animate props (103401 touch2: "chazi_tpose" the fork, "arm_tpose" the hand feeding her)
-    is_char = lambda name: "tpose" in name and not re.search(r"(^|/)[A-Za-z]+_tpose$", name)
+    # animate props (103401 touch2: "chazi_tpose" the fork, "arm_tpose" the hand feeding her;
+    # 109502 "@shu1_tpose" the book, "@wanou_tpose" the doll) - named by letters, hers by the skin id
+    is_char = lambda name: "tpose" in name and not re.search(r"(^|/)@?[A-Za-z]\w*_tpose$", name)
     schedule = []
     for t in tracks:
         if t["muted"] or not is_char(t["name"]) or t["name"].count("/") > 1:
@@ -667,12 +668,23 @@ def _sequence_data(proj: Project, prefab: str, playable: str, tracks: list[dict]
                     audio.append({"sheet": sheet, "cue": cue, "start": round(c["start"], 5),
                                   "voice": _field(body, "mIsVoice") == "1" or sheet.startswith("vo_")})
     placement = character_placement(tracks, is_char, duration)
+    stray = None
+    if placement and all(p == placement[0] for p in placement):
+        # a constant placement the camera never films near is a leftover key, not where she
+        # stands: 109502's loops action2_2 / action2_3 / touch1_action1_2 key her parent at
+        # ~(0.06, 0, 0.11) while every shot looks at her spot 15 m away (the placed
+        # sequences' look targets stay within 1.7 m of theirs) - left to fit_spots
+        x, _, z = placement[0][0]
+        miss = sorted(math.hypot(f["look_at"][0] - x, f["look_at"][2] - z) for f in frames if f.get("look_at"))
+        if miss and miss[len(miss) // 2] > 3.0:
+            stray, placement = placement[0], None
     return {"sequence": os.path.splitext(os.path.basename(prefab))[0],
             "timeline": os.path.relpath(playable, proj.assets), "fps": FPS, "duration": round(duration, 5),
             "space": "Unity world: left-handed, Y up, metres; the timeline root (where the character stands) at the origin",
             **camera,
             "character_schedule": schedule, "facial": facial, "camera_cuts": cuts, "animated_props": props,
-            "audio_cues": audio, "placement": placement, "frames": frames}
+            "audio_cues": audio, "placement": placement,
+            **({"placement_ignored": stray} if stray else {}), "frames": frames}
 
 
 
@@ -715,7 +727,10 @@ def character_placement(tracks: list[dict], is_char, duration: float) -> list | 
     debut is the case that showed it: the object stands 2.81 m back turned -59 deg for
     the opening shots, then steps to (0.11, -0.46) at +9.5 deg, then home - which is
     exactly where each shot's camera looks. Without it her body plays at the origin
-    and two shots film empty sand. None when nothing moves her.
+    and two shots film empty sand. 109502 places her the other way round: its parent
+    track animates "" - the parent object itself, in stage coordinates - carrying her
+    to each spot ((2.4, -0.05, 13.7) at -90 deg, ...). Both levels compose (parent x
+    her own). None when nothing moves her.
     """
     sys.path.insert(0, HERE)
     from unity_yaml import evaluate, parse_anim
@@ -728,34 +743,37 @@ def character_placement(tracks: list[dict], is_char, duration: float) -> list | 
     for t in tracks:
         if t["muted"] or t["type"] != "AnimationTrack":
             continue
-        target = obj if t["name"] == parent else ("" if t["name"] == char else None)
-        if target is None:
-            continue
+        # (level, path): level 0 moves her parent, level 1 moves her
+        targets = [(0, ""), (1, obj)] if t["name"] == parent else [(1, "")] if t["name"] == char else []
         entries = ([{"anim": t["infinite"], "start": 0.0, "duration": 1e9, "clip_in": 0.0, "time_scale": 1.0}]
                    if t["infinite"] else [dict(c) for c in t["clips"] if c.get("anim")])
-        for e in entries:
+        for e in entries if targets else []:
             clip = parse_anim(e["anim"])
-            pos = next((k for q, k in clip.position.items() if _path_is(q, target)), None)
-            rot = next((k for q, k in clip.rotation.items() if _path_is(q, target)), None)
-            eul = next((k for q, k in clip.euler.items() if _path_is(q, target)), None)
-            if pos or rot or eul:
-                sources.append((e, clip, pos, rot, eul))
+            for level, target in targets:
+                pos = next((k for q, k in clip.position.items() if _path_is(q, target)), None)
+                rot = next((k for q, k in clip.rotation.items() if _path_is(q, target)), None)
+                eul = next((k for q, k in clip.euler.items() if _path_is(q, target)), None)
+                if pos or rot or eul:
+                    sources.append((level, e, clip, pos, rot, eul))
     if not sources:
         return None
     out = []
     for i in range(int(round(duration * FPS)) + 1):
         t = i / FPS
-        p, q = (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)
-        for e, clip, pos, rot, eul in sources:
+        lv = [[(0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)] for _ in range(2)]
+        for level, e, clip, pos, rot, eul in sources:
             if not (e["start"] - 1e-6 <= t < e["start"] + e["duration"]):
                 continue
             lt = min(max(e["clip_in"] + (t - e["start"]) * e["time_scale"], 0.0), clip.stop_time)
             if pos:
-                p = tuple(evaluate(pos, lt, 3))
+                lv[level][0] = tuple(evaluate(pos, lt, 3))
             if rot:
-                q = tuple(evaluate(rot, lt, 4))
+                lv[level][1] = tuple(evaluate(rot, lt, 4))
             elif eul:
-                q = _euler_q(evaluate(eul, lt, 3))
+                lv[level][1] = _euler_q(evaluate(eul, lt, 3))
+        (pp, pq), (cp, cq) = lv
+        p = tuple(pp[k] + v for k, v in enumerate(_qrot(pq, cp)))
+        q = _qmul(pq, cq)
         out.append([[round(v, 6) for v in p], [round(v, 7) for v in q]])
     if all(abs(v) < 1e-6 for f in out for v in f[0]) and all(abs(f[1][3]) > 1 - 1e-9 for f in out):
         return None

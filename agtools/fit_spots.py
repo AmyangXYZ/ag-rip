@@ -257,6 +257,26 @@ def main() -> int:
                     out[s] = anchor
                 else:                        # a moving sequence: [from t, x, y, z, yaw] per part
                     out.setdefault(r["seq"], []).append([round(r["t0"], 5)] + anchor)
+    # the game's own anchor beats any fit: an action's loop, idles and touches share one
+    # spot (109502 night: action1_2__night / idle1_action1_2__night / touch1_action1_2__night),
+    # so one that the game places pins the rest of its family - day and night apart, as
+    # they are different stages in the same coordinates
+    def family(seq):
+        m = re.search(r"action\d+_\d+", seq)
+        return m and (m.group(0), "__night" in seq)
+    own = {}
+    for js in sorted(glob.glob(os.path.join(cams, f"{skin}@*.camera.json"))):
+        seq = os.path.basename(js)[:-len(".camera.json")].split("@", 1)[1]
+        pl = json.load(open(js, encoding="utf-8")).get("placement") if args.grep in seq else None
+        d = json.load(open(js, encoding="utf-8")) if pl else {}
+        if pl and not d.get("placement_source") and family(seq) and all(p == pl[0] for p in pl):
+            (x, y, z), q = pl[0]
+            own.setdefault(family(seq), [x, y, z, round(math.degrees(2 * math.atan2(q[1], q[3])), 2)])
+    for seq in sorted({r["seq"] for r in fits.values() if not r["own_placement"]}):
+        anchor = own.get(family(seq))
+        if anchor:
+            print(f"{seq}: its family's own anchor {anchor} (fit was {out.get(seq)})")
+            out[seq] = anchor
     for v in out.values():
         if isinstance(v[0], list):
             v.sort()
