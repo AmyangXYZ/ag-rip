@@ -501,7 +501,10 @@ def sequence(proj: Project, prefab: str) -> dict | None:
         for f in path_chain[path_chain.index(anim_tf) + 1:]:
             p = rel_path(anim_tf, f)
             pos = evaluate(clip.position[p], lt, 3) if clip and p in clip.position else tf[f]["pos"]
-            rot = evaluate(clip.rotation[p], lt, 4) if clip and p in clip.rotation else tf[f]["rot"]
+            # a recorded clip keys rotation as a quaternion or as Euler degrees (104601's
+            # rigs: localEulerAnglesRaw) - read as quaternion only, the rig kept its prefab pose
+            rot = (evaluate(clip.rotation[p], lt, 4) if clip and p in clip.rotation else
+                   _euler_q(evaluate(clip.euler[p], lt, 3)) if clip and p in clip.euler else tf[f]["rot"])
             n = math.sqrt(sum(c * c for c in rot)) or 1.0
             m = mul(m, trs(pos, tuple(c / n for c in rot), tf[f]["scale"]))
         return m
