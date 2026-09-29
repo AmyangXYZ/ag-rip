@@ -672,14 +672,21 @@ def _sequence_data(proj: Project, prefab: str, playable: str, tracks: list[dict]
                                   "voice": _field(body, "mIsVoice") == "1" or sheet.startswith("vo_")})
     placement = character_placement(tracks, is_char, duration)
     stray = None
-    if placement and all(p == placement[0] for p in placement):
-        # a constant placement the camera never films near is a leftover key, not where she
-        # stands: 109502's loops action2_2 / action2_3 / touch1_action1_2 key her parent at
-        # ~(0.06, 0, 0.11) while every shot looks at her spot 15 m away (the placed
-        # sequences' look targets stay within 1.7 m of theirs) - left to fit_spots
-        x, _, z = placement[0][0]
-        miss = sorted(math.hypot(f["look_at"][0] - x, f["look_at"][2] - z) for f in frames if f.get("look_at"))
-        if miss and miss[len(miss) // 2] > 3.0:
+    if placement:
+        # a placement the camera never films near is a leftover key, not where she stands:
+        # 109502's loops action2_2 / action2_3 / touch1_action1_2 key her parent at
+        # ~(0.06, 0, 0.11) while every shot looks at her spot 15 m away, and 104903's
+        # wedding sequences near the origin while theirs film a spot 85 out (the placed
+        # sequences' look targets stay within 1.7 m of theirs, a walk included, since the
+        # camera follows her; 104903 interact_touch_102 keys the origin 2.8 from its shots) -
+        # left to fit_spots, and never taken as its anchor
+        miss = []
+        for f in frames:
+            if f.get("look_at"):
+                x, _, z = placement[min(int(round(f["t"] * FPS)), len(placement) - 1)][0]
+                miss.append(math.hypot(f["look_at"][0] - x, f["look_at"][2] - z))
+        miss.sort()
+        if miss and miss[len(miss) // 2] > 2.0:
             stray, placement = placement[0], None
     return {"sequence": os.path.splitext(os.path.basename(prefab))[0],
             "timeline": os.path.relpath(playable, proj.assets), "fps": FPS, "duration": round(duration, 5),

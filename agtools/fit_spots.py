@@ -142,6 +142,14 @@ def main() -> int:
         if acc:
             all_paths.add("/".join(reversed(acc)))
 
+    # where the game itself stands her (constant own placement tracks), as (x, z)
+    game_spots = []
+    for js in glob.glob(os.path.join(cams, f"{skin}@*.camera.json")):
+        d = json.load(open(js, encoding="utf-8"))
+        pl = d.get("placement")
+        if pl and not d.get("placement_source") and all(p == pl[0] for p in pl):
+            game_spots.append((pl[0][0][0], pl[0][0][2]))
+
     fits, origin = {}, set()
     for js in sorted(glob.glob(os.path.join(cams, f"{skin}@*.camera.json"))):
         stem = os.path.basename(js)[:-len(".camera.json")]
@@ -159,8 +167,12 @@ def main() -> int:
         # wide shots of a character-space skin look past 1 unit now and then (108901,
         # 109501, 116601 ...) and a fit there sank her 0.2-0.4 into the floor or walked
         # 103401's debut 4.5 away; the stage spots real placement needs sit 4-85 out.
+        # Unless the look target sits nearer a spot the game places her at than the origin
+        # (104903 interact_touch_102 films its home spot 3.6 out, 1.1 from where it looks).
         dists = sorted(math.hypot(f["look_at"][0], f["look_at"][2]) for f in frames)
-        if dists[len(dists) // 2] < args.origin_radius:
+        mid = sorted(frames, key=lambda f: math.hypot(f["look_at"][0], f["look_at"][2]))[len(frames) // 2]["look_at"]
+        near_spot = any(math.hypot(mid[0] - x, mid[2] - z) < min(1.5, dists[len(dists) // 2]) for x, z in game_spots)
+        if dists[len(dists) // 2] < args.origin_radius and not near_spot:
             print(f"{seq}: look target mostly within {args.origin_radius} of the origin - character space, left unplaced")
             origin.add(seq)
             continue
