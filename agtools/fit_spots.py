@@ -123,8 +123,9 @@ def main() -> int:
     ap.add_argument("--spot-radius", type=float, default=1.5, help="look targets this close share a spot (m)")
     ap.add_argument("--max-residual", type=float, default=0.4,
                     help="a sequence the look target leaves further than this (m) is a walk, not a spot: left unplaced")
-    ap.add_argument("--origin-radius", type=float, default=1.0,
-                    help="a sequence whose look target stays this close to the origin (m) is in character space")
+    ap.add_argument("--origin-radius", type=float, default=3.0,
+                    help="a sequence whose look target mostly stays this close to the origin (median, game "
+                         "units) is in character space")
     args = ap.parse_args()
     skin, cid = args.skin, args.skin[:4]
     cams = os.path.join(ec.ANIM_OUT, cid, "cameras")
@@ -154,9 +155,13 @@ def main() -> int:
             continue
         # a look target that never leaves the timeline root is filming her where she
         # stands, in character space (128402's home-scene debut / touch1 / touch2 beside
-        # its wedding-stage sequences): nothing to place
-        if max(math.hypot(f["look_at"][0], f["look_at"][2]) for f in frames) < args.origin_radius:
-            print(f"{seq}: look target within {args.origin_radius} m of the origin - character space, left unplaced")
+        # its wedding-stage sequences): nothing to place. Judged on the MEDIAN, 3 units:
+        # wide shots of a character-space skin look past 1 unit now and then (108901,
+        # 109501, 116601 ...) and a fit there sank her 0.2-0.4 into the floor or walked
+        # 103401's debut 4.5 away; the stage spots real placement needs sit 4-85 out.
+        dists = sorted(math.hypot(f["look_at"][0], f["look_at"][2]) for f in frames)
+        if dists[len(dists) // 2] < args.origin_radius:
+            print(f"{seq}: look target mostly within {args.origin_radius} of the origin - character space, left unplaced")
             origin.add(seq)
             continue
         clip = parse_anim(anim)
