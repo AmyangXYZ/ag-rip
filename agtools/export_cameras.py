@@ -907,11 +907,11 @@ def export_characters(cid: str, job: dict, merged_dir: str, outputs: list[tuple[
     Morph JSONs become shape-key animation (standard FBX blend-shape channel curves)."""
     sys.path.insert(0, HERE)
     import export_anim_fbx
-    tmp_out = os.path.join(CACHE, "_char_out")
+    tmp_out = os.path.join(CACHE, f"_char_out_{os.getpid()}")
     shutil.rmtree(tmp_out, ignore_errors=True)
     j = dict(job, dir=merged_dir, clips=[f"{n}.anim" for n, _, _ in outputs], prefix="",
              morphs={n: m for n, _, m in outputs if m})
-    payload = os.path.join(CACHE, "_char_job.json")
+    payload = os.path.join(CACHE, f"_char_job_{os.getpid()}.json")
     json.dump({"cid": cid, "out": tmp_out, "dry_run": False, "no_fold_root": False,
                "script_dir": HERE, "jobs": [j]}, open(payload, "w"))
     r = subprocess.run([export_anim_fbx.find_blender(), "-b", "-noaudio", "-P",
@@ -1172,7 +1172,7 @@ def export_audio(skin: str, data: dict, out_dir: str, stem: str, lang: str) -> s
 def blender(payload: dict) -> None:
     sys.path.insert(0, HERE)
     from export_anim_fbx import find_blender
-    path = os.path.join(CACHE, "_cam_job.json")
+    path = os.path.join(CACHE, f"_cam_job_{os.getpid()}.json")
     json.dump(payload, open(path, "w"))
     r = subprocess.run([find_blender(), "-b", "-noaudio", "--factory-startup", "--python",
                         os.path.abspath(__file__), "--", "--blender", path], capture_output=True, text=True)
