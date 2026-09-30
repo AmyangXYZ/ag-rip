@@ -206,12 +206,11 @@ the bone stays at the pose its skinning was authored against instead of flipping
 
 ## Character names
 
-The game ships **no** ID → name table anywhere in StreamingAssets, DataBase, or the
-Unity persistent data; it comes from the server, and community wikis don't publish the
-internal IDs. It does ship per-ID portrait art, so `ag.py names` extracts one image per
-character and writes a contact sheet — read the names off it, save as `names.json`, and
-`ag.py find` accepts names from then on. 87 of 88 playable (`1xxx`) characters have art;
-`6xxx` IDs are NPC/boss/servant models.
+The game's decrypted config has them: `HeroCfg` gives each character ID its name
+(`suffix`, e.g. 1095 托特) and frame title (`name`, 苍鹭), and `SkinCfg` gives each skin's
+name and hero (107402 效率至上 → 1074). See the DLC table under Stages. Before the
+config was readable, `ag.py names` extracted per-ID portrait art into a contact sheet to
+read names off; `ag.py find` still accepts names from `names.json`.
 
 ## Stages
 
@@ -223,6 +222,84 @@ character and writes a contact sheet — read the names off it, save as `names.j
 | `ag.py cams 109501 104701` | a skin's authored camera sequences (victory pose + every DLC home-screen interaction) -> `AG_fbx_anim/<cid>/cameras/<skin>@<seq>.camera.fbx` + `.character.fbx` + `.camera.json` + previews - see "Camera sequences" |
 | `agtools/stage_thumbs.py --prefix x` | render each stage (glb → Blender) → `AG_stage_names/render/` |
 | `agtools/bundle_deps.py <bundle>` | a bundle's full dependency closure (`--index` rebuilds the CAB map, ~8 min) |
+
+### DLC skins, characters and stages
+
+The authoritative mapping, read from the decrypted game config (`AG_cache/re/lua_bc/game/config`,
+dumped with `tools/re/ljdump.py --json`). `ag.py stages` above guesses from asset names and
+dependencies; where they differ, this table wins.
+
+From the game's own config: `SkinCfg` (skin name, hero), `HeroCfg` (character
+name `suffix`, frame title `name`), `SkinSceneActionCfg` (skin → scene id) and
+`HomeSceneSettingCfg` (scene id → stage, scene title). **Bold** rows have
+animations exported; *Seqs* counts the folders in `AG_dlc_scene/<skin>/`.
+
+| Skin | Character | Frame | Skin name | Scene | Stage | Scene title | Stage GLB | Seqs |
+|---|---|---|---|---|---|---|---|---|
+| 101502 | 塞赫麦特 (1015) | 狂狮 | 不予投诉 | 6029 | X322 | 指名服务 | — | 0 |
+| 102001 | 梵天 (1020) | 三相 | 轻纱梦华 | 6016 | X313 | 嬉闹午后 | — | 0 |
+| 102003 | 梵天 (1020) | 三相 | 无间玩伴 | 6030 | X204a | 喧笑的时光 | — | 0 |
+| 102101 | 阿尔忒弥斯 (1021) | 曦光 | 炫色夏虹 | 6015 | X312 | 少女的绮想 | — | 0 |
+| **102201** | 塞勒涅 (1022) | 幽月 | 海滩漫步 | 6014 | X309 | 于月色中 | X309-塞勒涅海边.glb | 5 |
+| 102202 | 塞勒涅 (1022) | 幽月 | 沉醉旖旎 | 6028 | X324 | 杯光摇曳时 | — | 0 |
+| **103401** | 瓦吉特 (1034) | 潜蛇 | 家政小帮手 | 6027 | X323 | 预设中的意外 | x323-瓦吉特女仆.glb | 5 |
+| 103402 | 瓦吉特 (1034) | 潜蛇 | 恋恋春光 | 6046 | X339 | 心房一角 | — | 0 |
+| 104301 | 伊里伽尔 (1043) | 隐夜 | 童话式复古 | 6044 | X335 | 窗隅拾光 | — | 0 |
+| 104401 | 荷鲁斯 (1044) | 不灭王权 | 炸毛警报 | 6043 | X336 | 摸摸许可证 | — | 0 |
+| 104402 | 荷鲁斯 (1044) | 不灭王权 | 完美合奏 | 6052 | X206_normal | 少女欢奏之夜 | — | 0 |
+| 104501 | 亚莉莎 (1045) | 赤音 | 瑰色倾情 | 6037 | X329 | 新的旅程 | — | 0 |
+| **104601** | 雪儿 (1046) | 血弹 | 浮光织雪 | 6036 | X330 | 静夜心语 | X330-雪儿礼服.glb | 5 |
+| **104701** | 塞尔凯特 (1047) | 裁暗之锋 | 午夜沉沦 | 6040 | X333 | 吸引力法则 | X333-塞尔凯特泳池.glb | 6 |
+| 104902 | 伊邪那美 (1049) | 镜花黄泉 | 海之恋歌 | 6012 | X310 | 浮光的初景 | — | 0 |
+| **104903** | 伊邪那美 (1049) | 镜花黄泉 | 初雪千华 | 6049 | X343 | 尘世之缘 | X343-娜美花嫁.glb | 23 |
+| 105301 | 羲和 (1053) | 怀阳 | 暮色华尔兹 | 6050 | X342 | 天际线之上 | — | 0 |
+| 105401 | 无常 (1054) | 双司镇命 | 慵懒靠近你 | 6053 | X346 | 心动烘焙日记 | — | 0 |
+| 106101 | 执明 (1061) | 玄机 | 云雾敛 | 6005 | X303 | 相见欢 | — | 0 |
+| 106102 | 执明 (1061) | 玄机 | 绵暖冬意 | 6024 | X319 | 烘焙甜蜜 | — | 0 |
+| 106103 | 执明 (1061) | 玄机 | 沉溺于夏日 | 6039 | X332 | 悠闲盛夏 | — | 0 |
+| 107002 | 金乌 (1070) | 十曜 | 金雀钗 | 6026 | X321 | 知我意 | — | 0 |
+| 107301 | 麟钰 (1073) | 巧构 | 岁华似锦 | 6033 | X327 | 清平乐 | — | 0 |
+| **107402** | 英招 (1074) | 巡天 | 效率至上 | 6010 | X306a | 慌张时刻 | X306a.glb | 4 |
+| 107501 | 陵光 (1075) | 澄心 | 古墓来客 | 6004 | X302 | 朱阁幽话 | — | 0 |
+| 107502 | 陵光 (1075) | 澄心 | 霞语相思 | 6008 | X307 | 轻舞幽梦 | — | 0 |
+| 107503 | 陵光 (1075) | 澄心 | 试春衣 | 6031 | X325 | 不思量 | — | 0 |
+| 107601 | 庚辰 (1076) | 太一 | 代班董事 | 6009 | X306 | 休憩时间 | X306.glb | 0 |
+| 107602 | 庚辰 (1076) | 太一 | 海上的私语 | 6001 | X201 | 暮色珍珠 | — | 0 |
+| 107701 | 武罗 (1077) | 锻玉 | 沐兰泽 | 6056 | X347 | 良宵长 | — | 0 |
+| 108301 | 埃克什瓦 (1083) | 硝芒 | 热带蓝调 | 6041 | X334 | 夏日比拼 | — | 0 |
+| 108501 | 诗蔻蒂 (1085) | 绮望 | 梦的伊始 | 6032 | X326 | 少女的思绪 | — | 0 |
+| 108502 | 诗蔻蒂 (1085) | 绮望 | 永夜眷恋 | 6042 | X205_normal | 暮光的心旅 | — | 0 |
+| **108901** | 帕尔瓦蒂 (1089) | 焚轮 | 奢宴流风 | 6021 | X316 | 倦梦夜华 | X316.glb | 5 |
+| 108902 | 帕尔瓦蒂 (1089) | 焚轮 | 沉默信仰 | 6054 | X344 | 荒庭中的祈祷诗 | — | 0 |
+| 109304 | 国常立 (1093) | 觅影 | 护理时间 | 6003 | X301 | 特别看护 | — | 0 |
+| **109501** | 托特 (1095) | 苍鹭 | 入暮之诗 | 6007 | X305 | 花庭余响 | X305-托特钢琴.glb | 5 |
+| **109502** | 托特 (1095) | 苍鹭 | 绘夜之诗 | 6017 | X203b | 思念的归处·晨意 | built as X203.glb (to check) | 42 |
+| **109502** | 托特 (1095) | 苍鹭 | 绘夜之诗 | 6018 | X203c | 思念的归处·夜语 | built as X203a.glb (to check) | (shared) |
+| **109503** | 托特 (1095) | 苍鹭 | 扉页之吻 | 6057 | X348 | 飞羽栖处是归乡 | X348-托特花嫁.glb | 25 |
+| 111102 | 奥西里斯 (1111) | 生魂 | 瑞龙吟 | 6006 | X304 | 青玉案 | — | 0 |
+| 113301 | 海姆达尔 (1133) | 天卫 | 凝落初雪 | 6025 | X320 | 星灯下的梦 | — | 0 |
+| **113701** | 霍德尔 (1137) | 谧光之刻 | 幽情祷告 | 6048 | X340 | 私人表演 | X340-霍德尔修女.glb | 5 |
+| 113907 | 波塞冬 (1139) | 冰渊 | 澄灵海色 | 6013 | X311 | 温柔的回响 | — | 0 |
+| 115002 | 丰前坊天狗 (1150) | 绯染 | 专属女仆 | 6023 | X318 | 诚挚心意 | — | 0 |
+| **116601** | 大国主 (1166) | 星仪 | 兔兔奇遇 | 6058 | X350 | 仅予你的魔法 | X350-钢管舞.glb | 5 |
+| 117001 | 金乌 (1170) | 昭阳 | 毛绒派对 | 6055 | X345 | 幸运娃娃机 | — | 0 |
+| 119401 | 海拉 (1194) | 悼亡之蝶 | 魔女见习夜 | 6045 | X338 | 廊桥辉月 | — | 0 |
+| 119701 | 俄尼里伊 (1197) | 梦影 | 星之砂 | 6011 | X308 | 梦游奇境 | — | 0 |
+| 121101 | 奥西里斯 (1211) | 魂羽 | 绛羽拾花 | 6034 | X328 | 一枝春 | — | 0 |
+| 121102 | 奥西里斯 (1211) | 魂羽 | 邻座细语 | 6051 | X341 | 邻座细语 | — | 0 |
+| 124801 | 前鬼坊天狗 (1248) | 神威 | 南瓜小鬼头 | 6047 | X337 | 给糖也捣蛋 | — | 0 |
+| **128402** | 薇儿丹蒂 (1284) | 黯耀 | 致未来的我们 | 6022 | X317 | 纯白之誓 | X317-薇儿婚纱.glb | 21 |
+| **128403** | 薇儿丹蒂 (1284) | 黯耀 | 与你同在的每一日 | 6059 | X349 | 雨夜之约 | — (not built) | 5 |
+| 128404 | 薇儿丹蒂 (1284) | 黯耀 | 粉珊瑚狂热 | 6038 | X331 | 夏月夜 | — | 0 |
+
+**Notes**
+
+- 107402 and 107601 share the X306 room but not the scene. X306a carries
+  107402's own desk, chair and screens (`sc_107402_x306a_*`); X306 carries
+  107601's (`sc_107601_x306_*`).
+- 109502's config names X203b (day) and X203c (night); our builds are X203 and
+  X203a. Whether these are the same rooms is not yet checked.
+- 128403 has sequences but no stage built (X349).
 
 ### The hand-off
 
