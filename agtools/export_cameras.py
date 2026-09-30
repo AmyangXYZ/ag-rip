@@ -604,62 +604,6 @@ def _dot4(a, b):
     return sum(x * y for x, y in zip(a, b))
 
 
-def snap_masked_switches(tracks: list[dict], schedule: list[dict], facial: list[dict],
-                         cuts: list[dict]) -> list[dict]:
-    """Move each body-clip switch the game hides under its screen mask onto the camera cut.
-
-    The debuts switch body clips mid-timeline with a hard switch, and the hips land
-    somewhere else (109503 debut2: 0.7 m at 5.90 s). The game never shows it: a
-    StoryTimelineDormMaskUINode (UI/Dorm/StoryMaskUI) covers the screen over both the
-    camera cut and the switch (mask 5.00-6.567 s, cut 5.567, switch 5.90; mask
-    9.80-11.30, cut 10.30, switch 10.80). We export no mask, so the jump showed a few
-    frames into the new shot. Where one mask holds both, with the cut first, the switch
-    moves onto the cut: the outgoing excerpt ends there and the incoming one starts
-    there with its clip_in pulled back by the same time, so from the old switch on it
-    plays exactly as before; only frames the game covers differ. Facial excerpts that switch with the body
-    (same start) move with it. Returns what moved, for the JSON."""
-    masks = []
-    for t in tracks:
-        if t["muted"] or t["type"] != "StoryTimelineDormUITrack":
-            continue
-        for c in t["clips"]:
-            body = _read(c["node"]) if c["node"] else ""
-            if "StoryMaskUI" in (_field(body, "ui_path") or ""):
-                masks.append((c["start"], c["start"] + c["duration"]))
-    moved = []
-    for prev, s in zip(schedule, schedule[1:]):
-        if s.get("blend"):
-            continue                                # a cross-fade, not a jump
-        old = s["start"]
-        if abs(prev["start"] + prev["duration"] - old) > 1e-3:
-            continue                                # not back to back: nothing to join
-        for m0, m1 in masks:
-            if not (m0 - 1e-6 <= old <= m1 + 1e-6):
-                continue
-            under = [c["start"] for c in cuts if m0 - 1e-6 <= c["start"] < old - 1e-6 and c["start"] > prev["start"]]
-            if not under:
-                continue
-            # on the cut's FRAME, exactly: rounded to 5 places (5.56667 for frame 167
-            # at 30 fps) it falls just after the frame, and the old clip held one
-            # frame into the new shot
-            cut = round(max(under) * FPS) / FPS
-            d = old - cut
-            prev["duration"] = round(prev["duration"] - d, 5)
-            s["start"], s["duration"] = cut, round(s["duration"] + d, 5)
-            s["clip_in"] = round(s["clip_in"] - d * s["time_scale"], 5)
-            for f in facial:
-                if abs(f["start"] - old) < 1e-3:
-                    f["start"] = cut
-                    f["clip_in"] = f["clip_in"] - d * f["time_scale"]
-                    if f["duration"] is not None:
-                        f["duration"] = f["duration"] + d
-                elif f["duration"] is not None and abs(f["start"] + f["duration"] - old) < 1e-3:
-                    f["duration"] = f["duration"] - d
-            moved.append({"clip": s["clip"], "from": round(old, 5), "to": round(cut, 5), "mask": [round(m0, 5), round(m1, 5)]})
-            break
-    return moved
-
-
 def _sequence_data(proj: Project, prefab: str, playable: str, tracks: list[dict], duration: float,
                    frames: list[dict], camera: dict) -> dict:
     """Everything but the camera: character clip schedule, facial clips, audio cues, cuts."""
@@ -712,7 +656,6 @@ def _sequence_data(proj: Project, prefab: str, playable: str, tracks: list[dict]
                 cuts.append({"start": round(c["start"], 5), "duration": round(c["duration"], 5),
                              "blend_style": int(_field(body, "m_Style") or 0),
                              "blend_time": float(_field(body, "m_Time") or 0)})
-    masked = snap_masked_switches(tracks, schedule, facial, cuts)
     props = sorted({t["name"].split("/")[-1] for t in tracks
                     if not t["muted"] and t["type"].endswith("AnimationTrack") and t["clips"]
                     and (t["name"].count("/") > 1 or ("tpose" in t["name"] and not is_char(t["name"])))})
@@ -749,8 +692,7 @@ def _sequence_data(proj: Project, prefab: str, playable: str, tracks: list[dict]
             "timeline": os.path.relpath(playable, proj.assets), "fps": FPS, "duration": round(duration, 5),
             "space": "Unity world: left-handed, Y up, metres; the timeline root (where the character stands) at the origin",
             **camera,
-            "character_schedule": schedule, "facial": facial, "camera_cuts": cuts,
-            **({"masked_switches": masked} if masked else {}), "animated_props": props,
+            "character_schedule": schedule, "facial": facial, "camera_cuts": cuts, "animated_props": props,
             "audio_cues": audio, "placement": placement,
             **({"placement_ignored": stray} if stray else {}), "frames": frames}
 
