@@ -6,9 +6,7 @@ r"""Camera sequences -> MMD VMD (motion + morphs, camera) with reze-rig's fbx2vm
 
 For each <skin>@<seq> in AG_fbx_anim/<cid>/cameras/ (written by `ag.py cams`; a sequence
 whose timeline camera is disabled - it stays on the home camera - has no .camera.*), one
-folder AG_dlc_scene/<skin>/<group>/<seq>/, the group being the sequence's leading word -
-debut, action, touch, idle, interact, wedding, enter, return, win (e.g.
-AG_dlc_scene/109502/touch/touch1_action1_1/):
+folder AG_dlc_scene/<skin>/<seq>/ (e.g. AG_dlc_scene/109502/touch1_action1_1/):
   <seq>.character.fbx -> character.vmd   body retargeted onto the target model (FK, no
                                          foot IK - see --foot-ik; root motion kept),
                                          facial / lip morphs as MMD morphs
@@ -47,12 +45,6 @@ SCENE_SCALE = 8.0              # PMX per game unit; reze-design tools/stages: 1 
 
 
 
-def group_of(seq: str) -> str:
-    """The kind of sequence, its leading word: touch1_action1_1__night -> touch,
-    wedding_idle_101 -> wedding, debut2 -> debut. A skin has up to forty of them,
-    and one flat folder of all of them was hard to find anything in."""
-    m = re.match(r"[a-z]+", seq.lower())
-    return m.group(0) if m else "other"
 
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
@@ -85,7 +77,7 @@ def main() -> int:
                 continue
             cam = os.path.join(src, f"{stem}.camera.fbx")
             inputs = [p for p in (char, cam) if os.path.isfile(p)]
-            folder = os.path.join(out, group_of(seq), seq)
+            folder = os.path.join(out, seq)
             os.makedirs(folder, exist_ok=True)
             stale = os.path.join(folder, "camera.vmd")
             if not os.path.isfile(cam) and os.path.isfile(stale):
