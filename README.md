@@ -348,8 +348,9 @@ root) playing excerpts of its clips, camera-cut blends and props.
   the same frames. `.camera.json` holds the per-frame pose in Unity space for engines.
 - Previews are rendered from the final FBXs re-imported fresh (what a consumer sees).
 - **To VMD**: `python ag.py vmd <skin> --target-pmx <model.pmx>` writes, per sequence,
-  `<seq>.character.vmd` (motion + facial/lip morphs) and `<seq>.camera.vmd` into
-  `AG_dlc_scene/<skin>/`, with the `.wav` beside them. The conversion is
+  `character.vmd` (motion + facial/lip morphs), `camera.vmd` and `audio.wav` into
+  `AG_dlc_scene/<skin>/<group>/<seq>/`, the group being the sequence's kind (`debut`,
+  `action`, `touch`, `idle`, `interact`, `wedding`, `enter`, `return`, `win`). The conversion is
   **[reze-rig](https://github.com/AmyangXYZ/reze-rig)**'s `fbx2vmd` (MIT), vendored as a
   single Node bundle in `tools/reze-rig/` - see its README for the source commit, what
   it does and how to rebuild it. Target models are not included (the 托特 PMX forbids
