@@ -226,6 +226,11 @@ def match_asset_names(project: str) -> int:
             name = m.group(1).strip("'\"") if m else ""
             if not m or name == stem or re.sub(r'[:*?"<>|/\\]', "_", name) != stem:
                 continue
+            # A '/' in a name is data, not a filename accident: a DLC timeline's track
+            # "@107402ui/107402ui_tpose/107402_beizi_tpose" is the path the game binds it
+            # to. Taken as the filename it became underscores and bound to nothing.
+            if "/" in name or "\\" in name:
+                continue
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(text[:m.start(1)] + stem + text[m.end(1):])
             fixed += 1

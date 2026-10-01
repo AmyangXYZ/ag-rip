@@ -21,6 +21,20 @@ public static class AGSimShadows
     static RenderTexture _atlas;
     static CommandBuffer _cb;
     static readonly Matrix4x4[] _w2s = new Matrix4x4[5];
+
+    // What the last Render drew, per cascade, for a recorder (AGDlcRecord) to replay:
+    // the view and projection (Unity's, before its own GPU conversion), the atlas tile,
+    // the biases, and every (renderer, submesh) drawn with its caster pass.
+    public class Cascade
+    {
+        public Matrix4x4 view, proj;
+        public Rect rect;
+        public Vector4 bias;
+        public readonly List<(Renderer renderer, int submesh)> draws = new List<(Renderer, int)>();
+    }
+    public static readonly Cascade[] LastCascades = { new Cascade(), new Cascade(), new Cascade(), new Cascade() };
+    public static int LastCount;
+    public static int LastFrame = -1;
     static readonly Dictionary<Shader, int> _casterPass = new Dictionary<Shader, int>();
     static readonly ShaderTagId LightMode = new ShaderTagId("LightMode");
 
@@ -156,6 +170,10 @@ public static class AGSimShadows
             if (soft) { depthBias *= 2.5f; normalBias *= 2.5f; }
             _cb.SetGlobalVector("sim_ShadowBias", new Vector4(depthBias, normalBias, 0, 0));
             _cb.SetGlobalVector("sim_ShadowLightDirection", L);
+            var rec = LastCascades[c];
+            rec.view = view; rec.proj = proj; rec.rect = tileRect;
+            rec.bias = new Vector4(depthBias, normalBias, 0, 0);
+            rec.draws.Clear();
             foreach (var rnd in Casters(renderers, s.maxDistance))
             {
                 if ((rnd.bounds.center - center).magnitude - rnd.bounds.extents.magnitude > r + back) continue;
@@ -163,7 +181,11 @@ public static class AGSimShadows
                 for (int sm = 0; sm < mats.Length; sm++)
                 {
                     int pass = CasterPass(mats[sm]);
-                    if (pass >= 0) _cb.DrawRenderer(rnd, mats[sm], sm, pass);
+                    if (pass >= 0)
+                    {
+                        _cb.DrawRenderer(rnd, mats[sm], sm, pass);
+                        rec.draws.Add((rnd, sm));
+                    }
                 }
             }
 
@@ -187,6 +209,8 @@ public static class AGSimShadows
         Graphics.ExecuteCommandBuffer(_cb);
 
         for (int c = s.count; c < 5; c++) _w2s[c] = Matrix4x4.zero;
+        LastCount = s.count;
+        LastFrame = Time.frameCount;
         Shader.SetGlobalTexture("_MainLightShadowmapTexture", _atlas);
         Shader.SetGlobalMatrixArray("_MainLightWorldToShadow", _w2s);
         Shader.SetGlobalVector("_CascadeShadowSplitSpheres0", spheres[0]);

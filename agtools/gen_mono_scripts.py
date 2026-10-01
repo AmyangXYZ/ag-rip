@@ -161,6 +161,24 @@ def stub_files(project: str) -> dict:
 def render(ns: str, cls: str, base: str, node) -> str:
     g = Gen()
     body = g.fields(node.m_Children)
+    # A nested type may not share a name with a member of the class that declares it
+    # (C# CS0102): UIPoseMoveDataRoot has a list field PrePointData of type PrePointData.
+    # Unity serializes by field name, so the TYPE is the one renamed, where it is used
+    # as a type (a field's type or a List<> argument), never the field.
+    taken = {cls} | set(re.findall(r"public [\w<>.]+ (\w+);", "\n".join(body)))
+    for name in list(g.order):
+        if name not in taken:
+            continue
+        new = name + "Data"
+        while new in taken or new in g.nested:
+            new += "_"
+        pat = re.compile(r"(public |List<)" + re.escape(name) + r"(?=[ >])")
+        body = [pat.sub(lambda m: m.group(1) + new, l) for l in body]
+        for k in g.nested:
+            g.nested[k] = [pat.sub(lambda m: m.group(1) + new, l) for l in g.nested[k]]
+        g.nested[new] = g.nested.pop(name)
+        g.order[g.order.index(name)] = new
+        taken.add(new)
     lines = ["// Serialized layout rebuilt from the game's type tree (agtools/gen_mono_scripts.py).",
              "// Fields only - the game's code is not recoverable.",
              "using System;", "using System.Collections.Generic;", "using UnityEngine;",

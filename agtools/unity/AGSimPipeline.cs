@@ -328,11 +328,14 @@ public class AGSimPipeline : MonoBehaviour
         Shader.DisableKeyword("sim_DYN_FOG_LINEAR");
         Shader.DisableKeyword("sim_DYN_FOG_EXP");
         Shader.DisableKeyword("sim_DYN_FOG_EXP_SQ");
+        // the character shaders branch on this float, not the keyword (ForwardFeature sets both)
+        Shader.SetGlobalFloat("sim_DYN_FOG_LINEAR_Variable", 0f);
         Color dyn = Get(ss, "_dynamicFogColor", Color.clear);
         if (ss && Get(ss, "_dynamicFogMode", 0) == 1 && dyn.a > 0f && !debugDirectOnly)
         {
             float de = Get(ss, "_dynamicFogEnd", 1f), ds = Get(ss, "_dynamicFogStart", 0f);
             Shader.EnableKeyword("sim_DYN_FOG_LINEAR");
+            Shader.SetGlobalFloat("sim_DYN_FOG_LINEAR_Variable", 1f);
             Shader.SetGlobalColor("sim_DynFogColor", dyn);
             Shader.SetGlobalVector("sim_DynFogParams", new Vector4(-1f / (de - ds), de / (de - ds),
                 Get(ss, "_dynamicFogHeight", 0f), Get(ss, "_dynamicFogHeightGradient", 0f)));
