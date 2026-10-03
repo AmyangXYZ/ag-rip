@@ -38,6 +38,7 @@ Commands
   python ag.py scenes --grep x343        stage index (code, size, label, skins)
   python ag.py stages --char 1095        DLC skin -> stage table, with pictures
   python ag.py stage x343                stage -> Unity project  -> AG_stages/x343
+  python ag.py glbs                      every reze-design stage GLB, rebuilt (extract + Blender, batched)
   python ag.py reze AG_dlc_play/<dlc>    recorded DLC -> reze-design scene zip per sequence
 
   python ag.py names                     build the ID -> name contact sheet
@@ -67,6 +68,7 @@ COMMANDS = {
     "audit": ("audit_clips.py", "account for every clip in the tree; show any gaps"),
     "scenes": ("scenes.py", "index and export the 3D stages"),
     "stage": ("stage_unity.py", "one stage -> standalone Unity project (AG_stages)"),
+    "glbs": ("stage_glbs.py", "rebuild every reze-design stage GLB from the game (extract + Blender, batched)"),
     "dlc": ("dlc_play.py", "one DLC skin -> Unity project playing its sequences (AG_dlc_play)"),
     "reze": ("dlc_reze_scene.py", "one recorded DLC -> reze-design scene zips (stage, props, camera, audio)"),
     "voice": ("extract_voice.py", "voice / scene audio banks -> WAV (zh, ja if downloaded) + lip-sync data"),
