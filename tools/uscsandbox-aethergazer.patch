@@ -937,10 +937,10 @@ index 8ddfbb9..59efbf9 100644
              {
 diff --git a/USCSandbox/UltraShaderConverter/UShader/Function/UShaderFunctionToHLSL.BitExact.cs b/USCSandbox/UltraShaderConverter/UShader/Function/UShaderFunctionToHLSL.BitExact.cs
 new file mode 100644
-index 0000000..3bdc690
+index 0000000..b630c6b
 --- /dev/null
 +++ b/USCSandbox/UltraShaderConverter/UShader/Function/UShaderFunctionToHLSL.BitExact.cs
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,254 @@
 +using AssetRipper.Export.Modules.Shaders.UltraShaderConverter.USIL;
 +using D = AssetRipper.Export.Modules.Shaders.UltraShaderConverter.USIL.USILOperand.Domain;
 +
@@ -1108,6 +1108,9 @@ index 0000000..3bdc690
 +        void F1(USILInstruction inst, string fn) =>
 +            Assign(inst, Sat(inst, $"{fn}({inst.srcOperands[0].Read(D.F)})"), D.F);
 +
++        static bool IsBuiltinCube(USILOperand o) =>
++            (o.metadataName ?? o.ToString()) is "unity_SpecCube0" or "unity_SpecCube1";
++
 +        // same texture calls as the upstream handlers, coordinates read as float (int for ld)
 +        void EmitSample(USILInstruction inst)
 +        {
@@ -1143,7 +1146,12 @@ index 0000000..3bdc690
 +                    string uv = s[0].mask.Length == 2 ? $"float4({s[0].Read(D.F)}, 0, {s[3].Read(D.F)})"
 +                                                     : $"float4({s[0].Read(D.F)}, {s[3].Read(D.F)})";
 +                    string args = $"{s[2]}, {uv}";
-+                    value = tex.operandType switch
++                    // Unity's built-in cubes (unity_SpecCube0/1) are declared by UnityCG as
++                    // UNITY_DECLARE_TEXCUBE (TextureCube + sampler), not samplerCUBE: texCUBElod
++                    // on them does not compile, so the whole shader (PBR/Uber...) fails
++                    value = tex.operandType == USILOperandType.SamplerCube && !bias && IsBuiltinCube(s[2])
++                        ? $"UNITY_SAMPLE_TEXCUBE_LOD({s[2]}, {s[0].Read(D.F)}, {s[3].Read(D.F)})"
++                        : tex.operandType switch
 +                    {
 +                        USILOperandType.Sampler3D => bias ? $"tex3Dbias({args})" : $"tex3Dlod({args})",
 +                        USILOperandType.SamplerCube => bias ? $"texCUBEbias({args})" : $"texCUBElod({args})",
@@ -1156,7 +1164,9 @@ index 0000000..3bdc690
 +                default:
 +                {
 +                    string args = $"{s[2]}, {s[0].Read(D.F)}";
-+                    value = tex.operandType switch
++                    value = tex.operandType == USILOperandType.SamplerCube && IsBuiltinCube(s[2])
++                        ? $"UNITY_SAMPLE_TEXCUBE({args})"
++                        : tex.operandType switch
 +                    {
 +                        USILOperandType.Sampler3D => $"tex3D({args})",
 +                        USILOperandType.SamplerCube => $"texCUBE({args})",

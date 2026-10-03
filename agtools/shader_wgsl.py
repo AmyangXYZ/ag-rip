@@ -129,8 +129,12 @@ def pick(bl: list[dict], stage: str, want: set[str]) -> dict:
         raise SystemExit(f"no {stage} variant within {sorted(want)}")
     best = max(len(b["keywords"]) for b in cands)
     top = [b for b in cands if len(b["keywords"]) == best]
-    if len(top) > 1:
-        raise SystemExit(f"ambiguous {stage} variants: {[sorted(b['keywords']) for b in top]}")
+    # a keyword set the build has no variant for (a material with two keywords
+    # its shader never compiled together - Effect_Common's DISSOLVE_SIMPLE and
+    # DISSOLVE_PLUS, X309's ripple sweeps uv7/uv8) draws, in the game, the
+    # variant matching the most of them, the first of those in the shader's own
+    # order: here that is DISSOLVE_PLUS, the superset (the simple dissolve and
+    # its direction). The candidates are in file order.
     return top[0]
 
 

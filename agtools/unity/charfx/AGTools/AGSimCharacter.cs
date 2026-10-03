@@ -18,6 +18,11 @@
 //                                         cmd.DrawRenderer(renderer, sharedMaterials[sub], sub, pass)
 //   CharacterSceneEnvironment.Update      scene character ambient (EnvironmentEffectUtil) when the
 //                                         scene has one
+//   CharacterPointLightFeature.SetupRenderFeature -> CharacterPointLightSystem.SetUp
+//     (+ CharacterPointLightController.OnEnable/Update/OnDisable, CharacterPointLightSystem.Regist)
+//                                         the CharacterLighting cbuffer of the PBR character
+//                                         shaders (Uber/Eye/Fur/StockingCast/VAT): up to 4 lamps
+//                                         registered by CharacterPointLightControllers
 //
 // The built-in renderer never draws passes whose LightMode it does not know (CharHairShadow,
 // CharFaceShadow, Override1-3, PreDepth, Reflection), so those are drawn here from a command
@@ -94,6 +99,9 @@ public static class AGSimCharacter
         _sceneSetting = FindByTypeName("SceneSetting");
         _simMainLight = FindByTypeName("SimMainLight");
         _sceneEnvironment = FindByTypeName("CharacterSceneEnvironment");
+        _pointLightControllers.Clear();
+        foreach (var mb in Object.FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Include))
+            if (mb && mb.GetType().Name == "CharacterPointLightController") _pointLightControllers.Add(mb);
         _nextScan = Time.realtimeSinceStartup + 2f;
     }
 
@@ -107,6 +115,7 @@ public static class AGSimCharacter
         bool dirShadow = SetupCharacterShadow(cam);
         SetKeyword("SIM_DIRECTIONAL_SHADOW", dirShadow);
         SetupSceneEnvironment(cam);
+        SetupCharacterPointLights();
         BuildCharacterPasses(cam);
     }
 
@@ -282,6 +291,84 @@ public static class AGSimCharacter
         CharacterEffect.EnvironmentEffectUtil.SHCoefficients(
             CharacterEffect.EnvironmentEffectUtil.GetAmbientProbe(sky, eq, gr), CharacterEffect.EnvironmentEffectUtil.sceneSH);
         CharacterEffect.EnvironmentEffectUtil.sceneReflectionMap = refl as Cubemap;
+    }
+
+    // ---------------------------------------------------------------- character point lights
+    // CharacterPointLightController.OnEnable registers (light, (diffuseIntensity, specularIntensity,
+    // rimIntensity, flattedIntensity)) with CharacterPointLightSystem under an increasing index
+    // (Dictionary<int, CharacterPointLightData>: enumerated in registration order) and sets the
+    // light's ReplicaAdditionalLightData.m_Dummy; Update pushes changed intensities; OnDisable
+    // removes it. CharacterPointLightFeature.SetupRenderFeature runs CharacterPointLightSystem.SetUp
+    // @0x392ae60 on the camera's command buffer:
+    //   CharacterLightCount = min(count, 4) (the shader reads it with asint: integer bits)
+    //   for the first 4 registered lights whose Light.type != Directional (Light.enabled is not tested):
+    //     CharacterLightPosition[i]    = (transform.position, 0)
+    //     CharacterLightColor[i]       = (pow(r * intensity, 2.2), pow(g * I, 2.2), pow(b * I, 2.2), color.a)
+    //     CharacterLightParameters[i]  = (diffuse, specular, rim, flatted)
+    //     CharacterLightSpotDir[i]     = (0, 0, 1, 1 / m_ShapeRadius); spot: xyz = localToWorld column 2
+    //     CharacterLightAttenuation[i] = (1 / max(range^4, 1e-4), -range^4 / (0.64 range^4 - range^4), 0, 1);
+    //                                    spot: z, w = LightInfo.GetSpotAngleAttenuation(spotAngle, innerSpotAngle)
+    // The shader (SimPipeline/Character/PBR/Uber ForwardBase) then takes, per lamp at squared distance
+    // d2: min(1 / d2, SpotDir.w) * max(1 - (d2 * Att.x)^2, 0)^2 * spot^2 * Color, so the window
+    // reaches range^2 and the inverse square is clamped at d2 = m_ShapeRadius.
+    static readonly List<MonoBehaviour> _pointLightControllers = new List<MonoBehaviour>();
+    static readonly List<MonoBehaviour> _pointLightRegistry = new List<MonoBehaviour>();
+    static readonly Vector4[] _cplPos = new Vector4[4], _cplCol = new Vector4[4], _cplAtt = new Vector4[4],
+                              _cplPar = new Vector4[4], _cplDir = new Vector4[4];
+
+    static void SetupCharacterPointLights()
+    {
+        // the system's registry: drop the disabled, append the newly enabled (OnEnable order)
+        _pointLightRegistry.RemoveAll(c => !c || !c.isActiveAndEnabled);
+        foreach (var c in _pointLightControllers)
+            if (c && c.isActiveAndEnabled && !_pointLightRegistry.Contains(c)) _pointLightRegistry.Add(c);
+        int count = Mathf.Min(_pointLightRegistry.Count, 4);
+        Shader.SetGlobalFloat("CharacterLightCount", BitConverter.Int32BitsToSingle(count));
+        for (int i = 0; i < 4; i++)
+        {
+            _cplPos[i] = _cplCol[i] = _cplAtt[i] = _cplPar[i] = _cplDir[i] = Vector4.zero;
+            if (count == 0) _cplCol[i].w = 1f;
+        }
+        if (count > 0)
+        {
+            int n = 0;
+            foreach (var c in _pointLightRegistry)
+            {
+                if (n >= 4) break;
+                var light = c.GetComponent<Light>();     // Awake: _curLight = GetComponent<Light>()
+                if (!light || light.type == LightType.Directional) continue;
+                float shape = 0.01f;                      // ReplicaAdditionalLightData [Min(0.01)]
+                foreach (var mb in light.GetComponents<MonoBehaviour>())
+                    if (mb && mb.GetType().Name == "ReplicaAdditionalLightData") shape = Get(mb, "m_ShapeRadius", shape);
+                float range = light.range, intensity = light.intensity;
+                Color lc = light.color;
+                Vector3 p = light.transform.position;
+                _cplPos[n] = new Vector4(p.x, p.y, p.z, 0f);
+                _cplCol[n] = new Vector4(Mathf.Pow(lc.r * intensity, 2.2f), Mathf.Pow(lc.g * intensity, 2.2f),
+                                         Mathf.Pow(lc.b * intensity, 2.2f), lc.a);
+                _cplPar[n] = new Vector4(Get(c, "diffuseIntensity", 1f), Get(c, "specularIntensity", 1f),
+                                         Get(c, "rimIntensity", 1f), Get(c, "flattedIntensity", 0f));
+                _cplDir[n] = new Vector4(0f, 0f, 1f, 1f / shape);
+                float r4 = range * range * range * range;
+                _cplAtt[n] = new Vector4(1f / Mathf.Max(r4, 1e-4f), -r4 / (r4 * 0.64f - r4), 0f, 1f);
+                if (light.type == LightType.Spot)
+                {
+                    // GetSpotAngleAttenuation(spotAngle, innerSpotAngle as a Nullable with a value)
+                    float cosOuter = Mathf.Cos(light.spotAngle * 0.017453292f * 0.5f);
+                    float cosInner = Mathf.Cos(light.innerSpotAngle * 0.017453292f * 0.5f);
+                    float inv = 1f / Mathf.Max(cosInner - cosOuter, 0.001f);
+                    _cplAtt[n].z = inv; _cplAtt[n].w = -cosOuter * inv;
+                    Vector3 f = light.transform.localToWorldMatrix.GetColumn(2);
+                    _cplDir[n] = new Vector4(f.x, f.y, f.z, _cplDir[n].w);
+                }
+                n++;
+            }
+        }
+        Shader.SetGlobalVectorArray("CharacterLightPosition", _cplPos);
+        Shader.SetGlobalVectorArray("CharacterLightColor", _cplCol);
+        Shader.SetGlobalVectorArray("CharacterLightAttenuation", _cplAtt);
+        Shader.SetGlobalVectorArray("CharacterLightParameters", _cplPar);
+        Shader.SetGlobalVectorArray("CharacterLightSpotDir", _cplDir);
     }
 
     // ---------------------------------------------------------------- after-opaque character passes

@@ -105,10 +105,14 @@ public class AGSimPostFX : MonoBehaviour
 
     RenderTexture Bloom(RenderTexture src, float threshold)
     {
-        int w = Mathf.Max(1, src.width / 2), h = Mathf.Max(1, src.height / 2);
-        int mips = Mathf.Clamp(Mathf.FloorToInt(Mathf.Log(Mathf.Max(w, h), 2f) - 1), 1, 16);
+        // BloomPass.Execute @0x29a4200: mip 0 at pixelWidth >> 1, three more halvings (i = 1..3),
+        // the upsample from i = 2 (with mip 3 as its low mip) down to 0
+        int w = Mathf.Max(1, src.width >> 1), h = Mathf.Max(1, src.height >> 1);
+        const int mips = 4;
         _bloom.SetVector("_Params", new Vector4(bloomScatter, bloomClamp, threshold, threshold * bloomKnee));
-        var fmt = RenderTextureFormat.ARGBHalf;
+        // PostProcessFeature.Create: the bloom targets are RGB111110Float (GraphicsFormat B10G11R11)
+        var fmt = SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.RGB111110Float)
+            ? RenderTextureFormat.RGB111110Float : RenderTextureFormat.ARGBHalf;
         for (int i = 0; i < mips; i++)
         {
             _down[i] = RenderTexture.GetTemporary(w, h, 0, fmt);

@@ -3,15 +3,18 @@
 // P08Main HeroUITimelineBrain.BindPlayableDirector, AG_cache/re/hotfix):
 //   the model prefab Char/<modelId> (<skin>ui_custom) stands at HeroPosAndRotCfg (zero for
 //   DLC skins); the UI main camera carries a CinemachineBrain; each sequence prefab
-//   (UITimeLine/Charactor/<skin>/<seq>) goes under the model root at identity, every
-//   output track named "@path" / "#path" / "&path" is bound to what that path names
-//   (model root, then the sequence, then the scene), the model's Animator controller is
-//   cleared, and the director is rebuilt, evaluated at 0 and played.
+//   (UITimeLine/Charactor/<skin>/<seq>) goes under the model root at identity, the
+//   model root's HeroUITimelineBrain (added as the Lua side adds it) binds the tracks -
+//   by binding type: itself for the brain's own tracks (ConstraintNodeTrack), the
+//   component under what a "@path" / "#path" / "&path" name points at for the others -
+//   the model's Animator controller is cleared, and the director is rebuilt, evaluated
+//   at 0 and played.
 // The game plays a sequence's sound through CRI ADX2; here the sequence's extracted
 // audio (voice + scene, one WAV) starts with it.
 // Time runs at a fixed 30 fps (Time.captureFramerate) so every run is the same frame
 // for frame - the ManualAnimator's cross-fades advance by Time.deltaTime.
 using System;
+using System.Linq;
 using System.Collections;
 using System.Collections.Generic;
 using Unity.Cinemachine;
@@ -30,9 +33,19 @@ public class AGDlcPlayer : MonoBehaviour
         public AudioClip audio;
     }
 
+    // a prefab a game script loads by its bundle path (DynamicTimelineTrackBinding's
+    // CharBindings), for AGGameAssets
+    [Serializable]
+    public class GameAsset
+    {
+        public string path;
+        public GameObject prefab;
+    }
+
     public GameObject modelPrefab;
     public string modelId;
     public List<Sequence> sequences = new List<Sequence>();
+    public List<GameAsset> gameAssets = new List<GameAsset>();
     public int frameRate = 30;
     public bool loopAll = true;
 
@@ -41,17 +54,23 @@ public class AGDlcPlayer : MonoBehaviour
     public static event Action AllEnded;
 
     GameObject _model;
+    HeroUITimelineBrain _brain;
     AudioSource _audio;
 
     void Awake()
     {
         Time.captureFramerate = frameRate;
+        foreach (var a in gameAssets)
+            AGGameAssets.Register(a.path, a.prefab);
         EnsureCamera();
         var holder = new GameObject("Char");
         _model = Instantiate(modelPrefab, holder.transform);
         _model.name = modelId;
         _model.transform.localPosition = Vector3.zero;
         _model.transform.localRotation = Quaternion.identity;
+        // herouitimeline.lua PlayAction: GetComponent, else AddComponent
+        _brain = _model.GetComponent<HeroUITimelineBrain>();
+        if (_brain == null) _brain = _model.AddComponent<HeroUITimelineBrain>();
         // PosterGirlDlcActor.LoadModel -> UpdateCameraParams: the home camera group for the
         // centre view (ViewDirect.center = 0), then SetSelfCamera(0)
         var cm = _model.transform.Find("camera")?.GetComponent<CharacterCameraManager>();
@@ -87,10 +106,13 @@ public class AGDlcPlayer : MonoBehaviour
     IEnumerator Start()
     {
         yield return null;          // the home camera goes live first, as in the game
+        // -agSeq a,b: only those sequences (a recording of one take)
+        var only = (AGDlcCapture.Arg("-agSeq") ?? "").Split(',').Where(x => x.Length > 0).ToList();
         do
         {
             foreach (var seq in sequences)
-                yield return Play(seq);
+                if (only.Count == 0 || only.Contains(seq.name))
+                    yield return Play(seq);
             AllEnded?.Invoke();
         } while (loopAll);
     }
@@ -104,7 +126,7 @@ public class AGDlcPlayer : MonoBehaviour
         tl.transform.localScale = Vector3.one;
         tl.SetActive(true);
         var pd = tl.GetComponent<PlayableDirector>();
-        Bind(pd);
+        _brain.BindPlayableDirector(pd);
         pd.extrapolationMode = DirectorWrapMode.None;
         var saved = new List<(Animator, RuntimeAnimatorController)>();
         foreach (var a in _model.GetComponentsInChildren<Animator>(true))
@@ -113,6 +135,9 @@ public class AGDlcPlayer : MonoBehaviour
             a.runtimeAnimatorController = null;
         }
         pd.RebuildGraph();
+        // the pipeline stand-in rescans every 2 s: the sequence's renderers (and what its
+        // scripts spawned) get their rendering layer, object lights and shadow casting now
+        AGSimPipeline.Ensure().Refresh();
         pd.time = 0;
         pd.Evaluate();
         pd.Play();
@@ -132,38 +157,5 @@ public class AGDlcPlayer : MonoBehaviour
             if (a) a.runtimeAnimatorController = c;
         Destroy(tl);
         yield return null;
-    }
-
-    // HeroUITimelineBrain.BindPlayableDirector: the name prefix marks a track to bind by
-    // path; tracks without one keep their prefab binding.
-    void Bind(PlayableDirector pd)
-    {
-        if (!(pd.playableAsset is TimelineAsset timeline)) return;
-        foreach (var track in timeline.GetOutputTracks())
-        {
-            if (track.muted) continue;
-            string n = track.name ?? "";
-            if (n.Length < 2 || (n[0] != '@' && n[0] != '#' && n[0] != '&')) continue;
-            string path = n.Substring(1);
-            Transform t = _model.transform.Find(path) ?? pd.transform.Find(path);
-            if (t == null)
-            {
-                var g = GameObject.Find(path);
-                if (g) t = g.transform;
-            }
-            if (t == null)
-            {
-                Debug.LogWarning($"AGDlcPlayer: nothing at '{path}' for track {n}");
-                continue;
-            }
-            // the track's declared binding type, as the game reads it
-            Object bound = t.gameObject;
-            var attrs = track.GetType().GetCustomAttributes(typeof(TrackBindingTypeAttribute), true);
-            Type type = attrs.Length > 0 ? ((TrackBindingTypeAttribute)attrs[0]).type : null;
-            if (type == typeof(Animator)) bound = t.GetComponentInChildren<Animator>(true);
-            else if (type != null && type != typeof(GameObject) && typeof(Component).IsAssignableFrom(type))
-                bound = t.GetComponentInChildren(type, true);
-            pd.SetGenericBinding(track, bound);
-        }
     }
 }

@@ -270,9 +270,10 @@ def _guid_paths(assets: str) -> dict[str, str]:
     return out
 
 
-def unity_batch(project: str, prefab_scenes: list[tuple[str, str]]) -> str:
+def unity_batch(project: str, prefab_scenes: list[tuple[str, str]], method: str = "AGManifest.Batch") -> str:
     """One Unity launch: import, generate prefab scenes, write ag_render_manifest.json
-    (AGManifest.cs), then give every guid in it its asset path."""
+    (AGManifest.cs), then give every guid in it its asset path. `method`: an editor method
+    that runs AGManifest.Batch and more in the same launch (dlc_play: AGDlcScene.BatchAll)."""
     proj = os.path.join(project, "ExportedProject")
     if prefab_scenes:
         with open(os.path.join(proj, "ag_prefab_scenes.txt"), "w", encoding="utf-8") as fh:
@@ -286,7 +287,7 @@ def unity_batch(project: str, prefab_scenes: list[tuple[str, str]]) -> str:
         return "Unity not found - open the project and run AGManifest.Batch to write the manifest"
     log = os.path.join(project, "_unity_batch.log")
     subprocess.run([UNITY, "-batchmode", "-quit", "-projectPath", proj,
-                    "-executeMethod", "AGManifest.Batch", "-logFile", log], check=False)
+                    "-executeMethod", method, "-logFile", log], check=False)
     man = os.path.join(proj, "ag_render_manifest.json")
     if not os.path.isfile(man):
         return f"manifest NOT written - see {log}"
@@ -408,8 +409,10 @@ def summarize(project: str) -> dict:
     return dict(sorted(counts.items(), key=lambda kv: -kv[1])[:8])
 
 
-def finish(project: str, code: str, bundles: list[str], missing: set[str], note: str) -> str:
-    """Everything after the AssetRipper export (also what --refresh re-runs)."""
+def finish(project: str, code: str, bundles: list[str], missing: set[str], note: str,
+           method: str = "AGManifest.Batch", before_unity=None) -> str:
+    """Everything after the AssetRipper export (also what --refresh re-runs). before_unity:
+    more file changes to make once the fix-ups are in, before the Unity launch imports."""
     mats, unmatched = install_real_shaders(project)
     note += (f"{mats} decompiled shader(s) installed"
              + (f"; no source for {len(unmatched)}: {unmatched[:6]}" if unmatched else ""))
@@ -418,7 +421,9 @@ def finish(project: str, code: str, bundles: list[str], missing: set[str], note:
     unmaterialed = disable_unmaterialed(project)
     set_linear_color_space(project)
     reference(project, project_name(code))
-    note += "; " + unity_batch(project, prefab_scene_list(project, code))
+    if before_unity:
+        before_unity()
+    note += "; " + unity_batch(project, prefab_scene_list(project, code), method)
     found = find_scenes(project)
     with open(os.path.join(project, "ag_stage.json"), "w", encoding="utf-8") as fh:
         json.dump({"code": code, "bundles": bundles, "scenes": found,

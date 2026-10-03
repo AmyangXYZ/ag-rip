@@ -98,11 +98,11 @@ public static class AGSimShadows
             for (int i = 1; i < lods.Length; i++)
                 foreach (var lr in lods[i].renderers) if (lr) skipLod.Add(lr);
         }
-        float giant = Mathf.Max(100f, maxDistance * 4f);
         foreach (var rnd in renderers)
         {
-            if (!rnd || !rnd.enabled || rnd.shadowCastingMode == ShadowCastingMode.Off || !rnd.gameObject.activeInHierarchy) continue;
-            if (skipLod.Contains(rnd) || rnd.bounds.size.magnitude > giant) continue;
+            // whether it is on (and its bounds) is read per frame in Render: the scan is
+            // every 2 s and fx switch on and off between scans
+            if (!rnd || rnd.shadowCastingMode == ShadowCastingMode.Off || skipLod.Contains(rnd)) continue;
             _casters.Add(rnd);
         }
         return _casters;
@@ -176,6 +176,9 @@ public static class AGSimShadows
             rec.draws.Clear();
             foreach (var rnd in Casters(renderers, s.maxDistance))
             {
+                // destroyed since the last scan (a sequence ended), or off this frame
+                if (!rnd || !rnd.enabled || !rnd.gameObject.activeInHierarchy) continue;
+                if (rnd.bounds.size.magnitude > Mathf.Max(100f, s.maxDistance * 4f)) continue;
                 if ((rnd.bounds.center - center).magnitude - rnd.bounds.extents.magnitude > r + back) continue;
                 var mats = rnd.sharedMaterials;
                 for (int sm = 0; sm < mats.Length; sm++)

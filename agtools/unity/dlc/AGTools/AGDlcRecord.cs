@@ -8,13 +8,19 @@
 //   scene.json "materials"                   shader, enabled keywords, queue, every property
 //   scene.json "renderers"                   kind, mesh, materials, bone renderer paths
 //   <sequence>.frames.jsonl                  one line per frame: camera, the pipeline's global
-//                                            values, renderers changed this frame (matrix,
+//                                            values, the sequence's director time ("clipTime":
+//                                            the clip clock the line shows, which the timeline
+//                                            has already advanced a frame past when the first
+//                                            line is written), renderers changed this frame (matrix,
 //                                            enabled, property block), bones/blend weights and
-//                                            particle meshes by offset into <sequence>.frames.bin
-//   unity/<seq>_<frame>.png                  the Unity reference every -agEvery frames (unity_raw/:
-//                                            the same without the post chain)
-//   unity_full/<seq>_<frame>.jpg             every frame (not with -agNoFull / -agNoPost), which
-//                                            agtools/dlc_web.py turns into unity/<seq>.webm
+//                                            particle meshes ("particles") and trail / line
+//                                            ribbons ("trail", same layout) by offset into
+//                                            <sequence>.frames.bin
+//   unity/<seq>_<frame>.png                  only with -agEvery N: the Unity reference every N
+//                                            frames (unity_raw/: the same without the post chain)
+//   unity_full/<seq>_<frame>.jpg             only with -agFull: every frame (not with -agNoPost),
+//                                            which agtools/dlc_web.py turns into unity/<seq>.webm
+// Without -agEvery / -agFull no reference images are written (the default).
 // Static renderers are written once; a frame line carries only what changed.
 using System;
 using System.Collections.Generic;
@@ -43,11 +49,12 @@ public class AGDlcRecord : MonoBehaviour
     readonly List<string> _meshJson = new List<string>(), _texJson = new List<string>(), _matJson = new List<string>(), _rendJson = new List<string>();
 
     string _seq;
+    PlayableDirector _pd;           // the sequence playing (its time is the clip clock)
     int _frame;
     bool _recording;
     bool _noPost, _full;
     string _refDir = "unity";
-    int _every = 15, _w = 1600, _h = 900;
+    int _every, _w = 1600, _h = 900;    // _every 0: no reference images
     RenderTexture _rt;
     Texture2D _shot;
     StreamWriter _lines;
@@ -56,11 +63,12 @@ public class AGDlcRecord : MonoBehaviour
     Material _cubeMat;
     readonly HashSet<string> _shadowAt = new HashSet<string>((AGDlcCapture.Arg("-agShadowAt") ?? "").Split(',').Where(x => x.Length > 0));
     string _lutId;
+    readonly List<System.Threading.Tasks.Task> _writes = new List<System.Threading.Tasks.Task>();
     Mesh _bake;
 
     // every global the pipeline stand-in sets, by name and kind: Resources/ag_globals.json,
     // collected from its source by agtools/dlc_play.py (Shader/CommandBuffer.SetGlobal*)
-    [Serializable] class G { public string name; public string kind; }
+    [Serializable] class G { public string name; public string kind; [NonSerialized] public int id; }
     [Serializable] class Gs { public G[] globals; }
     G[] _globals = new G[0];
     // shader name -> the uniform names its decompiled source declares (Resources/
@@ -86,6 +94,8 @@ public class AGDlcRecord : MonoBehaviour
         foreach (var p in FindObjectsByType<AGDlcPlayer>()) p.loopAll = false;
         var ta = Resources.Load<TextAsset>("ag_globals");
         if (ta) _globals = JsonUtility.FromJson<Gs>(ta.text).globals;
+        foreach (var g in _globals) g.id = Shader.PropertyToID(g.name);
+        _lightIndicesId = Shader.PropertyToID("unity_LightIndices");
         var tu = Resources.Load<TextAsset>("ag_shader_uniforms");
         if (tu)
             foreach (var u in JsonUtility.FromJson<Us>(tu.text).shaders) _uniforms[u.shader] = u.names;
@@ -97,14 +107,15 @@ public class AGDlcRecord : MonoBehaviour
         // alone; they go to unity_raw/ beside the normal unity/ ones
         _noPost = Environment.GetCommandLineArgs().Contains("-agNoPost");
         _refDir = _noPost ? "unity_raw" : "unity";
-        Directory.CreateDirectory(Path.Combine(_dir, _refDir));
-        // -agNoFull: only the reference frames every -agEvery, no full-rate frames
-        _full = !_noPost && !Environment.GetCommandLineArgs().Contains("-agNoFull");
+        if (_every > 0) Directory.CreateDirectory(Path.Combine(_dir, _refDir));
+        // -agFull: every frame as well (unity_full/), for the page's full-rate Unity video
+        _full = !_noPost && Environment.GetCommandLineArgs().Contains("-agFull");
         if (_full) Directory.CreateDirectory(Path.Combine(_dir, "unity_full"));
-        AGDlcPlayer.SequenceStarted += (name, pd) => Begin(name);
+        AGDlcPlayer.SequenceStarted += (name, pd) => { _pd = pd; Begin(name); };
         AGDlcPlayer.SequenceEnded += name => End();
         AGDlcPlayer.AllEnded += () =>
         {
+            System.Threading.Tasks.Task.WaitAll(_writes.ToArray());
             WriteScene();
             Debug.Log("AGDlcRecord: done");
 #if UNITY_EDITOR
@@ -175,7 +186,7 @@ public class AGDlcRecord : MonoBehaviour
             // -agShadowAt <seq>:<frame>[,...]: the main-light shadow atlas Unity drew for that
             // frame, as raw depth floats (shadow/<seq>_<frame>.bin, rows as Unity holds them)
             if (_shadowAt.Contains($"{_seq}:{_frame - 1}")) DumpShadow($"{_seq}_{_frame - 1:0000}");
-            bool keep = (_frame - 1) % _every == 0;
+            bool keep = _every > 0 && (_frame - 1) % _every == 0;
             if (keep || _full)
             {
                 var active = RenderTexture.active;
@@ -229,6 +240,7 @@ public class AGDlcRecord : MonoBehaviour
               .Append(",\"near\":").Append(F(cam.nearClipPlane)).Append(",\"far\":").Append(F(cam.farClipPlane)).Append('}');
         }
         sb.Append(",\"time\":").Append(F(Time.time)).Append(",\"frameCount\":").Append(Time.frameCount);
+        if (_pd) sb.Append(",\"clipTime\":").Append(_pd.time.ToString("R", System.Globalization.CultureInfo.InvariantCulture));
         // the pipeline object is hidden (HideFlags): FindObjectsOfTypeAll finds it
         var pipe = Resources.FindObjectsOfTypeAll<AGSimPipeline>().FirstOrDefault(p => p && p.isActiveAndEnabled);
         if (pipe)
@@ -292,7 +304,7 @@ public class AGDlcRecord : MonoBehaviour
         foreach (var g in _globals)
         {
             if (g.kind != "Texture") continue;
-            var t = Shader.GetGlobalTexture(g.name);
+            var t = Shader.GetGlobalTexture(g.id);
             if (!t || t is RenderTexture) continue;
             if (!_globalTex.ContainsKey(g.name)) _globalTex[g.name] = RegisterTexture(t);
         }
@@ -303,7 +315,8 @@ public class AGDlcRecord : MonoBehaviour
             string id = Register(r);
             if (id == null) continue;
             string state = State(r);
-            if (_last.TryGetValue(r, out var prev) && prev == state && !(r is SkinnedMeshRenderer) && !(r is ParticleSystemRenderer))
+            if (_last.TryGetValue(r, out var prev) && prev == state && !(r is SkinnedMeshRenderer) && !(r is ParticleSystemRenderer)
+                && !(r is TrailRenderer) && !(r is LineRenderer))
                 continue;
             _last[r] = state;
             if (!first) sb.Append(',');
@@ -322,6 +335,8 @@ public class AGDlcRecord : MonoBehaviour
             }
             if (r is ParticleSystemRenderer psr && psr.enabled && psr.gameObject.activeInHierarchy && cam)
                 sb.Append(",\"particles\":").Append(WriteParticles(psr, cam));
+            if ((r is TrailRenderer || r is LineRenderer) && r.enabled && r.gameObject.activeInHierarchy && cam)
+                sb.Append(",\"trail\":").Append(WriteTrail(r, cam));
             sb.Append('}');
         }
         sb.Append("}}");
@@ -367,7 +382,39 @@ public class AGDlcRecord : MonoBehaviour
     // a particle system's geometry as Unity builds it for this camera (world space)
     string WriteParticles(ParticleSystemRenderer psr, Camera cam)
     {
+        // a mesh-mode system with no mesh (102201 touch2's water1) draws nothing, and
+        // BakeMesh on it is a native crash; one with an unreadable mesh cannot be baked
+        if (psr.renderMode == ParticleSystemRenderMode.Mesh)
+        {
+            var ms = new Mesh[Math.Max(psr.meshCount, 1)];
+            int n = psr.GetMeshes(ms);
+            if (n == 0 || ms.Take(n).Any(m => !m || !m.isReadable)) return "null";
+        }
         psr.BakeMesh(_bake, cam, ParticleSystemBakeMeshOptions.BakeRotationAndScale | ParticleSystemBakeMeshOptions.BakePosition);
+        return WriteBaked();
+    }
+
+    // a trail's (or line's) ribbon as Unity builds it for this camera, world space: the
+    // same layout as a particle bake
+    string WriteTrail(Renderer r, Camera cam)
+    {
+        if (r is TrailRenderer tr)
+        {
+            if (tr.positionCount < 2) return "null";
+            tr.BakeMesh(_bake, cam, true);
+        }
+        else if (r is LineRenderer lr)
+        {
+            if (lr.positionCount < 2) return "null";
+            lr.BakeMesh(_bake, cam, true);
+        }
+        return WriteBaked();
+    }
+
+    // _bake as float32 positions xyz, uv0 xyzw, colour rgba8, uint32 indices at an offset
+    // in the .bin: [offset, vertices, indices]
+    string WriteBaked()
+    {
         if (_bake.vertexCount == 0) return "null";
         long at = _bin.Position;
         var v = _bake.vertices;
@@ -389,12 +436,13 @@ public class AGDlcRecord : MonoBehaviour
     string Register(Renderer r)
     {
         if (_renderers.TryGetValue(r, out var id)) return id;
-        if (!(r is MeshRenderer || r is SkinnedMeshRenderer || r is ParticleSystemRenderer)) return null;
+        if (!(r is MeshRenderer || r is SkinnedMeshRenderer || r is ParticleSystemRenderer || r is TrailRenderer || r is LineRenderer)) return null;
         id = "r" + _renderers.Count;
         _renderers[r] = id;
         var sb = new StringBuilder();
         sb.Append("{\"id\":\"").Append(id).Append("\",\"path\":\"").Append(Esc(PathOf(r.transform)))
-          .Append("\",\"kind\":\"").Append(r is SkinnedMeshRenderer ? "skinned" : r is ParticleSystemRenderer ? "particles" : "mesh")
+          .Append("\",\"kind\":\"").Append(r is SkinnedMeshRenderer ? "skinned" : r is ParticleSystemRenderer ? "particles"
+                                         : r is TrailRenderer ? "trail" : r is LineRenderer ? "line" : "mesh")
           .Append("\",\"layer\":").Append(r.gameObject.layer)
           .Append(",\"sortingOrder\":").Append(r.sortingOrder)
           .Append(",\"shadowCasting\":").Append((int)r.shadowCastingMode)
@@ -404,6 +452,15 @@ public class AGDlcRecord : MonoBehaviour
                   : r.TryGetComponent(out MeshFilter mf) ? mf.sharedMesh : null;
         if (r is ParticleSystemRenderer pr && pr.renderMode == ParticleSystemRenderMode.Mesh) mesh = pr.mesh;
         if (mesh) sb.Append(",\"mesh\":\"").Append(RegisterMesh(mesh)).Append('"');
+        // a statically batched renderer shares its batch's combined mesh (vertices in
+        // batch-root space) and draws its materials on submeshes from this index on
+        if (r is MeshRenderer mr && r.isPartOfStaticBatch)
+            sb.Append(",\"subMeshStart\":").Append(mr.subMeshStartIndex);
+        // a ribbon's u: along its length 0..1 (Stretch) or by distance (Tile, ...)
+        if (r is TrailRenderer trr)
+            sb.Append(",\"textureMode\":\"").Append(trr.textureMode).Append("\",\"trailTime\":").Append(F(trr.time));
+        if (r is LineRenderer lnr)
+            sb.Append(",\"textureMode\":\"").Append(lnr.textureMode).Append('"');
         if (r is SkinnedMeshRenderer smr)
         {
             sb.Append(",\"bones\":[").Append(string.Join(",", smr.bones.Select(b => "\"" + Esc(b ? PathOf(b) : "") + "\""))).Append(']');
@@ -603,7 +660,17 @@ public class AGDlcRecord : MonoBehaviour
             read.Apply();
             RenderTexture.active = prev;
             string file = id + (hdr ? ".bin" : ".png");
-            File.WriteAllBytes(Path.Combine(_dir, "textures", file), hdr ? read.GetRawTextureData() : read.EncodeToPNG());
+            string path = Path.Combine(_dir, "textures", file);
+            if (hdr) File.WriteAllBytes(path, read.GetRawTextureData());
+            else
+            {
+                // the PNG is encoded off the main thread (ImageConversion is thread safe), from
+                // the same pixels: the recording waits for every file before it ends
+                var raw = read.GetRawTextureData();
+                var fmt = read.graphicsFormat;
+                uint rw = (uint)w, rh = (uint)h;
+                _writes.Add(System.Threading.Tasks.Task.Run(() => File.WriteAllBytes(path, ImageConversion.EncodeArrayToPNG(raw, fmt, rw, rh))));
+            }
             files.Add(file);
             RenderTexture.ReleaseTemporary(rt);
             Destroy(read);
@@ -625,13 +692,41 @@ public class AGDlcRecord : MonoBehaviour
     }
 
     // ---------------------------------------------------------------- helpers
+    // per shader, the uniform names its source declares (null: none listed); per set of
+    // shaders, the names to ask a block for, in order, with their property ids
+    readonly Dictionary<Shader, string[]> _shaderUniforms = new Dictionary<Shader, string[]>();
+    class BlockNames { public Shader[] shaders; public string[] names; public int[] ids; }
+    readonly List<BlockNames> _blockNames = new List<BlockNames>();
+    readonly List<Shader> _blockKey = new List<Shader>();
+    int _lightIndicesId;
+
     string Block(MaterialPropertyBlock b, Material[] mats)
     {
-        // Unity cannot list a block's contents: ask for every uniform the shaders declare
-        var names = new HashSet<string>();
+        // Unity cannot list a block's contents: ask for every uniform the shaders declare.
+        // The list for a set of shaders is built once (the same names in the same order as
+        // a fresh set each time) and asked for by property id.
+        _blockKey.Clear();
         foreach (var m in mats)
-            if (m && _uniforms.TryGetValue(m.shader.name, out var ns)) names.UnionWith(ns);
-        names.Add("unity_LightData");
+            if (m) _blockKey.Add(m.shader);
+        BlockNames list = null;
+        foreach (var e in _blockNames)
+            if (e.shaders.Length == _blockKey.Count && _blockKey.SequenceEqual(e.shaders)) { list = e; break; }
+        if (list == null)
+        {
+            var set = new HashSet<string>();
+            foreach (var m in mats)
+            {
+                if (!m) continue;
+                var sh = m.shader;
+                if (!_shaderUniforms.TryGetValue(sh, out var ns))
+                    _shaderUniforms[sh] = ns = _uniforms.TryGetValue(sh.name, out var found) ? found : null;
+                if (ns != null) set.UnionWith(ns);
+            }
+            set.Add("unity_LightData");
+            var arrNames = set.ToArray();
+            list = new BlockNames { shaders = _blockKey.ToArray(), names = arrNames, ids = arrNames.Select(Shader.PropertyToID).ToArray() };
+            _blockNames.Add(list);
+        }
         var sb = new StringBuilder("{");
         bool first = true;
         void Put(string name, string v)
@@ -639,22 +734,26 @@ public class AGDlcRecord : MonoBehaviour
             sb.Append(first ? "" : ",").Append('"').Append(name).Append("\":").Append(v);
             first = false;
         }
-        foreach (var name in names)
+        var names = list.names;
+        var ids = list.ids;
+        for (int i = 0; i < names.Length; i++)
         {
+            string name = names[i];
+            int id = ids[i];
             if (name == "unity_LightIndices") continue;
-            if (b.HasMatrix(name)) Put(name, M(b.GetMatrix(name)));
-            else if (b.HasVector(name)) Put(name, V4(b.GetVector(name)));
-            else if (b.HasFloat(name)) Put(name, F(b.GetFloat(name)));
-            else if (b.HasInt(name)) Put(name, b.GetInt(name).ToString());
-            else if (b.HasTexture(name))
+            if (b.HasMatrix(id)) Put(name, M(b.GetMatrix(id)));
+            else if (b.HasVector(id)) Put(name, V4(b.GetVector(id)));
+            else if (b.HasFloat(id)) Put(name, F(b.GetFloat(id)));
+            else if (b.HasInt(id)) Put(name, b.GetInt(id).ToString());
+            else if (b.HasTexture(id))
             {
-                var t = b.GetTexture(name);
+                var t = b.GetTexture(id);
                 if (t && !(t is RenderTexture)) Put(name, "{\"tex\":\"" + RegisterTexture(t) + "\"}");
             }
         }
-        if (b.HasVector("unity_LightIndices"))
+        if (b.HasVector(_lightIndicesId))
         {
-            var arr = b.GetVectorArray("unity_LightIndices");
+            var arr = b.GetVectorArray(_lightIndicesId);
             if (arr != null) Put("unity_LightIndices", "[" + string.Join(",", arr.Select(v => IntBits(v))) + "]");
         }
         return sb.Append('}').ToString();
@@ -704,12 +803,12 @@ public class AGDlcRecord : MonoBehaviour
     {
         switch (g.kind)
         {
-            case "Float": case "Int": return F(Shader.GetGlobalFloat(g.name));
-            case "Vector": case "Color": return V4(Shader.GetGlobalVector(g.name));
-            case "Matrix": return M(Shader.GetGlobalMatrix(g.name));
-            case "VectorArray": { var a = Shader.GetGlobalVectorArray(g.name); return a == null ? null : "[" + string.Join(",", a.Select(V4)) + "]"; }
-            case "FloatArray": { var a = Shader.GetGlobalFloatArray(g.name); return a == null ? null : "[" + string.Join(",", a.Select(F)) + "]"; }
-            case "MatrixArray": { var a = Shader.GetGlobalMatrixArray(g.name); return a == null ? null : "[" + string.Join(",", a.Select(M)) + "]"; }
+            case "Float": case "Int": return F(Shader.GetGlobalFloat(g.id));
+            case "Vector": case "Color": return V4(Shader.GetGlobalVector(g.id));
+            case "Matrix": return M(Shader.GetGlobalMatrix(g.id));
+            case "VectorArray": { var a = Shader.GetGlobalVectorArray(g.id); return a == null ? null : "[" + string.Join(",", a.Select(V4)) + "]"; }
+            case "FloatArray": { var a = Shader.GetGlobalFloatArray(g.id); return a == null ? null : "[" + string.Join(",", a.Select(F)) + "]"; }
+            case "MatrixArray": { var a = Shader.GetGlobalMatrixArray(g.id); return a == null ? null : "[" + string.Join(",", a.Select(M)) + "]"; }
             case "Texture": return null;     // see GlobalTexture
             default: return null;
         }
@@ -740,8 +839,33 @@ public class AGDlcRecord : MonoBehaviour
         return string.Join("/", parts);
     }
 
-    static string Esc(string s) => (s ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"");
-    static string F(float f) => float.IsFinite(f) ? f.ToString("R", CultureInfo.InvariantCulture) : "0";
+    // JSON string body: quotes, backslashes and control characters (a blendshape
+    // named "EB_Up_R<tab>" on 109503 broke the scene.json)
+    static string Esc(string s)
+    {
+        var sb = new StringBuilder();
+        foreach (var ch in s ?? "")
+        {
+            if (ch == '"') sb.Append("\\\"");
+            else if (ch == '\\') sb.Append("\\\\");
+            else if (ch < ' ') sb.Append("\\u").Append(((int)ch).ToString("x4"));
+            else sb.Append(ch);
+        }
+        return sb.ToString();
+    }
+    // a float as round-trip text: the same bits always give the same text, so it is formatted
+    // once (most values repeat frame after frame: static matrices, unchanged globals)
+    static readonly Dictionary<int, string> _floatText = new Dictionary<int, string>();
+    static string F(float f)
+    {
+        if (!float.IsFinite(f)) return "0";
+        int bits = BitConverter.SingleToInt32Bits(f);
+        if (_floatText.TryGetValue(bits, out var s)) return s;
+        if (_floatText.Count >= 1 << 21) _floatText.Clear();
+        s = f.ToString("R", CultureInfo.InvariantCulture);
+        _floatText[bits] = s;
+        return s;
+    }
     static string V(Vector3 v) => "[" + F(v.x) + "," + F(v.y) + "," + F(v.z) + "]";
     static string V4(Vector4 v) => "[" + F(v.x) + "," + F(v.y) + "," + F(v.z) + "," + F(v.w) + "]";
     static string C(Color c) => "[" + F(c.r) + "," + F(c.g) + "," + F(c.b) + "," + F(c.a) + "]";

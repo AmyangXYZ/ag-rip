@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-r"""A recorded DLC scene (AGDlcRecord) -> the shaders the WebGPU page draws it with.
+r"""A recorded DLC scene (AGDlcRecord) -> the game's shaders in WGSL, for the reze export.
 
     python agtools/dlc_web.py AG_dlc_play/107402-英招-效率至上
-    python agtools/dlc_web.py AG_dlc_play/107402-英招-效率至上 --page   (page, index, serve.bat only)
 
 Reads web/data/scene.json (materials: shader, enabled keywords; the global keywords the
 pipeline had on) and, for every pass the game's pipeline draws (ForwardBase, Always -
@@ -12,6 +11,8 @@ compiles to with shader_wgsl.py. Writes:
   web/data/variants.json   material -> [{pass, lightMode, variant, state}] where state is the
                            pass's render state (Blend, ZWrite, ZTest, Cull, ColorMask) with its
                            [_Property] references resolved from the material
+  web/data/index.json      the recorded sequences in play order
+  README.md                the Unity project and how the reze zips are made
 A keyword group of a multi_compile line with no "_" entry always has one keyword on: the
 first when the material names none (Unity's rule), so OPAQUE for a Standard material
 with no blend keyword.
@@ -23,8 +24,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -102,105 +101,26 @@ def resolve(state: dict, props: dict) -> dict:
     return {k: [val(t) for t in re.findall(r"\[\w+\]|[^\s,]+", v)] for k, v in state.items()}
 
 
-PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "agplay")
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def ffmpeg_exe() -> str | None:
-    """ffmpeg from PATH, else the one the imageio-ffmpeg package ships."""
-    exe = shutil.which("ffmpeg")
-    if exe:
-        return exe
-    try:
-        import imageio_ffmpeg
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return None
-
-
-def encode_unity_videos(data: str) -> dict[str, int]:
-    """The full-rate Unity frames (AGDlcRecord unity_full/<seq>_<frame>.jpg, every frame)
-    -> unity/<seq>.webm, which the page plays beside the WebGPU frames. VP9 4:4:4 (no chroma
-    subsampling, so the difference view stays honest), a keyframe every 15 frames for quick
-    seeks, frame n at n/30 s. The JPEGs are the recorder's intermediate and are removed once
-    encoded; a sequence without them keeps its earlier video. Returns frames per sequence."""
-    src = os.path.join(data, "unity_full")
-    seqs = {}
-    for fn in os.listdir(src) if os.path.isdir(src) else []:
-        m = re.fullmatch(r"(.+)_(\d{4})\.jpg", fn)
-        if m:
-            seqs.setdefault(m.group(1), []).append(int(m.group(2)))
-    exe = ffmpeg_exe() if seqs else None
-    if seqs and not exe:
-        print("  ! no ffmpeg (PATH or pip imageio-ffmpeg): unity_full/ left unencoded")
-        return {}
-    out = {}
-    for seq, frames in sorted(seqs.items()):
-        frames.sort()
-        if frames != list(range(len(frames))):
-            print(f"  ! {seq}: unity_full frames are not 0..{len(frames) - 1} without gaps; not encoded")
-            continue
-        video = os.path.join(data, "unity", f"{seq}.webm")
-        os.makedirs(os.path.dirname(video), exist_ok=True)
-        r = subprocess.run([exe, "-hide_banner", "-loglevel", "error", "-y", "-framerate", "30", "-start_number", "0",
-                            "-i", os.path.join(src, f"{seq}_%04d.jpg"),
-                            "-c:v", "libvpx-vp9", "-pix_fmt", "yuv444p", "-crf", "34", "-b:v", "0", "-g", "15",
-                            "-row-mt", "1", "-deadline", "good", "-cpu-used", "4",
-                            "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
-                            video], capture_output=True, text=True)
-        if r.returncode != 0:
-            print(f"  ! {seq}: ffmpeg failed: {(r.stderr or r.stdout)[-500:]}")
-            continue
-        for f in frames:
-            os.remove(os.path.join(src, f"{seq}_{f:04d}.jpg"))
-        out[seq] = len(frames)
-        print(f"  unity/{seq}.webm: {len(frames)} frames, {os.path.getsize(video) / 1e6:.0f} MB")
-    if os.path.isdir(src) and not os.listdir(src):
-        os.rmdir(src)
-    return out
-
-
 def write_index(project: str, data: str) -> None:
-    """data/index.json: the recorded sequences in play order, the frames that have a
-    Unity reference image (data/unity/<seq>_<frame>.png) and the full-rate Unity video
-    (data/unity/<seq>.webm) when there is one."""
+    """data/index.json: the recorded sequences in play order (dlc_reze_scene.py and
+    stage_native.py read it)."""
     meta = {}
     dlc = os.path.join(project, "dlc.json")
     if os.path.isfile(dlc):
         meta = json.load(open(dlc, encoding="utf-8"))
-    def frames_in(folder):
-        out = {}
-        d = os.path.join(data, folder)
-        for fn in os.listdir(d) if os.path.isdir(d) else []:
-            m = re.fullmatch(r"(.+)_(\d{4})\.png", fn)
-            if m:
-                out.setdefault(m.group(1), []).append(int(m.group(2)))
-        return out
-    refs, raw = frames_in("unity"), frames_in("unity_raw")
-    # the sequences' audio (voice + scene, extract_voice.py), played in step with the frames
-    audio = {}
-    skin_dir = os.path.join(ROOT, "AG_dlc_scene", str(meta.get("skin", "")))
-    os.makedirs(os.path.join(data, "audio"), exist_ok=True)
     recorded = [fn[:-len(".frames.jsonl")] for fn in os.listdir(data) if fn.endswith(".frames.jsonl")]
     order = [s for s in meta.get("play", []) if s in recorded] + sorted(s for s in recorded if s not in meta.get("play", []))
-    for s in order:
-        wav = os.path.join(skin_dir, s, "audio.wav")
-        if os.path.isfile(wav):
-            shutil.copyfile(wav, os.path.join(data, "audio", f"{s}.wav"))
-            audio[s] = f"audio/{s}.wav"
     json.dump({"skin": meta.get("skin", ""), "title": " ".join(x for x in (meta.get("skin"), meta.get("character"), meta.get("skin_name")) if x),
                "stage": meta.get("stage", ""),
-               "sequences": [{"name": s, "unityFrames": sorted(refs.get(s, [])), "rawFrames": sorted(raw.get(s, [])),
-                              "unityVideo": f"unity/{s}.webm" if os.path.isfile(os.path.join(data, "unity", f"{s}.webm")) else None,
-                              "audio": audio.get(s)} for s in order]},
+               "sequences": [{"name": s} for s in order]},
               open(os.path.join(data, "index.json"), "w", encoding="utf-8"), indent=1, ensure_ascii=False)
 
 
 README = """# {title}
 
-Two ways to watch {skin}'s sequences ({seqs}) in stage {stage}, to check against the game.
+{skin}'s sequences ({seqs}) in stage {stage}.
 
-## Unity (the reference)
+## Unity
 
 1. Unity Hub > Add > Add project from disk: `unity/ExportedProject` (Unity 6000.6.1f1).
 2. Open the scene `Assets/AGScenes/DLC_{skin}.unity` and press Play.
@@ -209,68 +129,61 @@ The sequences play back to back and loop, with their audio, bound the way the ga
 binds them. The game's shaders, pipeline, character rendering and timelines are ported
 from its decompiled code (agtools/dlc_play.py).
 
-## WebGPU (the port)
+## reze
 
-Double-click `serve.bat` (or run `python serve.py` in `web/`) and open
-http://localhost:8765 in Chrome. The page draws the recorded frames with the game's own
-shaders translated to WebGPU, beside Unity's frames of the same moments:
-
-- **View**: side by side, swipe (move the mouse), blink (space), difference heatmap.
-- **Unity with / without post**, and **WebGPU post** on or off, to compare shading alone.
-- **Play** runs on the audio clock, Unity's side from its full-rate video (every frame).
-  Paused, **exact reference frames only** shows Unity's lossless images (every 15th frame);
-  unticked, any frame from the video. The arrow keys step between frames.
-- The score is the mean colour difference against the Unity frame (0-255).
-- The cards below list the uniforms the port does not supply (with the ones the game
-  leaves at their defaults here, and why) and any GPU errors.
-"""
-
-SERVE = """@echo off
-rem the WebGPU compare page for this DLC: http://localhost:8765
-cd /d "%~dp0web"
-start "" http://localhost:8765
-rem serve.py, not `python -m http.server`: the videos need byte ranges to seek
-python serve.py 8765
+`python ag.py reze AG_dlc_play/{folder}` writes one reze-design scene zip per sequence
+to `reze/` (Import scene). It reads `web/data/`: the recording (AGDlcRecord) and the
+game's shaders translated to WGSL (agtools/dlc_web.py).
 """
 
 
-def install_page(project: str) -> None:
-    """The compare page (agtools/web/agplay) next to its data: web/index.html, web/js/*,
-    plus serve.bat and README.md in the DLC folder."""
+def write_readme(project: str) -> None:
+    """README.md in the DLC folder: the Unity project and how the reze zips are made."""
     meta = {}
     if os.path.isfile(os.path.join(project, "dlc.json")):
         meta = json.load(open(os.path.join(project, "dlc.json"), encoding="utf-8"))
     title = " ".join(x for x in (meta.get("skin"), meta.get("character"), meta.get("skin_name")) if x) or os.path.basename(project)
     with open(os.path.join(project, "README.md"), "w", encoding="utf-8") as fh:
         fh.write(README.format(title=title, skin=meta.get("skin", ""), stage=meta.get("stage", ""),
-                               seqs=", ".join(meta.get("play", [])) or "all"))
-    with open(os.path.join(project, "serve.bat"), "w", encoding="utf-8") as fh:
-        fh.write(SERVE)
-    dst = os.path.join(project, "web")
-    for dp, _, fns in os.walk(PAGE):
-        for fn in fns:
-            src = os.path.join(dp, fn)
-            out = os.path.join(dst, os.path.relpath(src, PAGE))
-            os.makedirs(os.path.dirname(out), exist_ok=True)
-            with open(src, "rb") as a, open(out, "wb") as b:
-                b.write(a.read())
+                               seqs=", ".join(meta.get("play", [])) or "all", folder=os.path.basename(project)))
+
+
+def _translate_job(job: tuple, out_dir: str, dxc: str):
+    path, want, i, name, texture_space, _ = job
+    try:
+        shader_wgsl.translate(path, want, i, os.path.join(out_dir, name), dxc, texture_space=texture_space)
+        return name
+    except SystemExit as e:
+        return e
+
+
+def translate_all(jobs: dict, out_dir: str) -> dict:
+    """key -> variant name, or the SystemExit its translation stopped with. The variants
+    are independent: a process per core (AG_WGSL_JOBS=1 runs them in this process)."""
+    workers = int(os.environ.get("AG_WGSL_JOBS") or os.cpu_count() or 1)
+    if workers <= 1 or len(jobs) <= 1:
+        return {k: _translate_job(j, out_dir, DXC) for k, j in jobs.items()}
+    from concurrent.futures import ProcessPoolExecutor
+    with ProcessPoolExecutor(max_workers=min(workers, len(jobs))) as pool:
+        futs = {k: pool.submit(_translate_job, j, out_dir, DXC) for k, j in jobs.items()}
+        return {k: f.result() for k, f in futs.items()}
 
 
 def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     project = os.path.abspath(args[0])
     data = os.path.join(project, "web", "data")
-    if "--page" in sys.argv:  # the page, index and serve.bat alone; shaders as they are
-        encode_unity_videos(data)
-        write_index(project, data)
-        install_page(project)
-        return 0
     scene = json.load(open(os.path.join(data, "scene.json"), encoding="utf-8"))
     files = shader_files(project)
     glob = set(scene.get("globalKeywords", []))
     out_dir = os.path.join(data, "shaders")
     os.makedirs(out_dir, exist_ok=True)
     infos, done, variants, problems = {}, {}, {}, []
+    # every distinct variant is listed first and translated once, in parallel (each runs
+    # dxc and naga in a temp folder of its own); the results are put together in the
+    # order of the materials, as one by one
+    jobs: dict = {}            # key -> (shader path, keywords, pass, out, texture_space, label)
+    mat_passes = []
     for mat in scene["materials"]:
         path = files.get(mat["shader"])
         if not path:
@@ -287,18 +200,11 @@ def main() -> int:
                 continue
             want = want_keywords(p["groups"], enabled)
             key = (path, i, tuple(sorted(want)))
-            if key not in done:
+            if key not in jobs:
                 name = re.sub(r"\W+", "_", mat["shader"]) + f"_p{i}_" + hashlib.md5(repr(key).encode()).hexdigest()[:8]
-                try:
-                    shader_wgsl.translate(path, want, i, os.path.join(out_dir, name), DXC)
-                    done[key] = name
-                except SystemExit as e:
-                    done[key] = None
-                    problems.append(f"{mat['shader']} pass {i} {sorted(want)}: {str(e)[:300]}")
-            if done[key]:
-                passes.append({"pass": i, "lightMode": p["lightMode"], "variant": done[key],
-                               "state": resolve(p["state"], mat["props"])})
-        variants[mat["id"]] = passes
+                jobs[key] = (path, want, i, name, False, f"{mat['shader']} pass {i} {sorted(want)}")
+            passes.append((key, i, p))
+        mat_passes.append((mat, passes))
     # the post chain (AGSimPostFX): Final pass 0 with the keywords it had, Bloom passes 0-3
     post = None
     for fn in sorted(os.listdir(data)):
@@ -310,25 +216,53 @@ def main() -> int:
                     if post and post.get("lut"):
                         break
             break
+    post_keys = {}
     if post:
-        out = {}
         for key, shader_name, passes, kws in (("final", post.get("finalShader"), [0], set(post.get("finalKeywords", []))),
                                               ("bloom", post.get("bloomShader"), [0, 1, 2, 3], set())):
             path = files.get(shader_name or "")
             if not path:
-                problems.append(f"post {key}: no source for {shader_name}")
+                post_keys[key] = f"post {key}: no source for {shader_name}"
                 continue
             if path not in infos:
                 infos[path] = pass_info(path)
-            names = []
+            keys = []
             for i in passes:
                 want = want_keywords(infos[path][i]["groups"], kws | glob)
                 name = re.sub(r"\W+", "_", shader_name) + f"_p{i}_" + hashlib.md5(repr((path, i, sorted(want), "texture")).encode()).hexdigest()[:8]
-                try:
-                    shader_wgsl.translate(path, want, i, os.path.join(out_dir, name), DXC, texture_space=True)
-                    names.append(name)
-                except SystemExit as e:
-                    problems.append(f"post {key} pass {i}: {str(e)[:300]}")
+                jk = ("post", path, i, tuple(sorted(want)))
+                jobs.setdefault(jk, (path, want, i, name, True, f"post {key} pass {i}"))
+                keys.append(jk)
+            post_keys[key] = keys
+    results = translate_all(jobs, out_dir)
+    for key, name in results.items():
+        if isinstance(name, str):
+            done[key] = name
+        else:
+            done[key] = None
+    for mat, passes in mat_passes:
+        out = []
+        for key, i, p in passes:
+            if key in results and not isinstance(results[key], str):
+                problems.append(f"{jobs[key][5]}: {str(results.pop(key))[:300]}")
+            if done[key]:
+                out.append({"pass": i, "lightMode": p["lightMode"], "variant": done[key],
+                            "state": resolve(p["state"], mat["props"])})
+        variants[mat["id"]] = out
+    if post:
+        out = {}
+        for key in ("final", "bloom"):
+            ks = post_keys.get(key)
+            if isinstance(ks, str):
+                problems.append(ks)
+                continue
+            names = []
+            for jk in ks:
+                r = results.get(jk)
+                if isinstance(r, str):
+                    names.append(r)
+                else:
+                    problems.append(f"{jobs[jk][5]}: {str(r)[:300]}")
                     names.append(None)
             out[key] = names
         variants["_post"] = out
@@ -346,9 +280,8 @@ def main() -> int:
     variants["_textureDefaults"] = defaults
     json.dump(variants, open(os.path.join(data, "variants.json"), "w", encoding="utf-8"), indent=1)
     print(f"{sum(1 for v in done.values() if v)} variants translated for {len(variants)} materials -> {out_dir}")
-    encode_unity_videos(data)
     write_index(project, data)
-    install_page(project)
+    write_readme(project)
     for p in problems:
         print("  !", p)
     return 0

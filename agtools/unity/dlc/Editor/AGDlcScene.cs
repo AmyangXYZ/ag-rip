@@ -32,6 +32,23 @@ public static class AGDlcScene
                 prefab = prefab,
                 audio = string.IsNullOrEmpty(s.audio) ? null : AssetDatabase.LoadAssetAtPath<AudioClip>(s.audio),
             });
+            // what the sequence's DynamicTimelineTrackBinding loads by bundle path:
+            // Assets/Com*/ABResources/<path>.prefab
+            foreach (var dtb in prefab.GetComponentsInChildren<DynamicTimelineTrackBinding>(true))
+                foreach (var cb in dtb.CharBindings)
+                {
+                    if (string.IsNullOrEmpty(cb.path) || player.gameAssets.Exists(a => a.path == cb.path)) continue;
+                    string want = ("/ABResources/" + cb.path + ".prefab").ToLowerInvariant();
+                    string found = null;
+                    foreach (var g in AssetDatabase.FindAssets(Path.GetFileName(cb.path) + " t:Prefab"))
+                    {
+                        string p = AssetDatabase.GUIDToAssetPath(g);
+                        if (p.ToLowerInvariant().EndsWith(want)) { found = p; break; }
+                    }
+                    if (found == null) { Debug.LogError($"AGDlcScene: {s.name} loads '{cb.path}' - no Assets/*/ABResources/{cb.path}.prefab"); continue; }
+                    player.gameAssets.Add(new AGDlcPlayer.GameAsset { path = cb.path, prefab = AssetDatabase.LoadAssetAtPath<GameObject>(found) });
+                    Debug.Log($"AGDlcScene: {s.name} loads {cb.path} = {found}");
+                }
         }
         Directory.CreateDirectory("Assets/AGScenes");
         string path = $"Assets/AGScenes/DLC_{spec.skin}.unity";
@@ -44,6 +61,14 @@ public static class AGDlcScene
     {
         Build();
         AssetDatabase.SaveAssets();
+    }
+
+    // A fresh project's one launch (agtools/dlc_play.py): the stage project's import and
+    // manifest (AGManifest.Batch), then the DLC scene.
+    public static void BatchAll()
+    {
+        AGManifest.Batch();
+        Batch();
     }
 
     // Open the DLC scene and enter Play mode; AGDlcCapture (runtime, -agOut) writes the

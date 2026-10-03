@@ -208,7 +208,9 @@ public class AGSimPipeline : MonoBehaviour
         foreach (var l in FindObjectsOfType<Light>())
             if (l != mainLight && l.isActiveAndEnabled && l.type != LightType.Directional)
                 _lights.Add(l);
-        _renderers = FindObjectsOfType<Renderer>();
+        // inactive ones too: a sequence's fx switch on between scans (control clips) and
+        // must have their rendering layer and object lights from their first frame
+        _renderers = FindObjectsOfType<Renderer>(true);
     }
 
     static Cubemap _black;

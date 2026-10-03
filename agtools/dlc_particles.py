@@ -30,8 +30,11 @@ Systems that share a spec and a material are one effect with several emitters
 matrices (the ParticleSystem's GameObject), game space; PMX = (-x, y, -z) * 8.
 
 A mesh particle (render mode 4) is not a billboard the app's generator draws:
-one that holds a single still particle (X306a's hologram sphere, qiu) is
-returned as a mesh prop at the particle's recorded pose instead.
+its particles are returned as a mesh prop instead, each one at the pose the
+recording baked it in, frame by frame, on while it is alive (X306a's still
+hologram sphere qiu; 102201's water splash and ripple rings). An emitter that
+moves (one on her hand) keys its point bones with its recorded motion
+(particle_emitters.vmd).
 """
 from __future__ import annotations
 
@@ -54,13 +57,21 @@ PARTICLES_TS = os.path.join(REZE, "lib", "unity-particles.ts")
 WGSL_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reze_particle_wgsl.mts")
 
 SCALE = 8.0
+RATE = 30          # recorded frames a second (the clip clock)
 FLIP = np.diag([-1.0, 1.0, -1.0])
 METRES_PER_UNIT = 0.64      # reze-design's game unit in metres; x 12.5 PMX/metre = 8
 WORLD = METRES_PER_UNIT * 12.5
 EMITTERS = "particle_emitters"
 ROOT_BONE = "全ての親"
-TONG_AB = ("ZTong/Tong_jichu_AB", "ZTong/Tong_jichu_AB_2_Mask")
+# the _Always variants are an older, simpler build of the same sheet drawn with
+# ZTest Always (over everything): AB_Always's fragment is AB's; Add_Always's is
+# rgb = tex * _Color * vc, a = tex.a * _Color.a * vc.a * mask, Blend One One with the
+# colour premultiplied - Effect_Common added (_DstBlend 1), not Tong_jichu_Add's
+# luminance mask and squared vertex alpha. The depth test is not carried.
+TONG_AB = ("ZTong/Tong_jichu_AB", "ZTong/Tong_jichu_AB_2_Mask", "ZTong/Tong_jichu_AB_Always")
 TONG_ADD = ("ZTong/Tong_jichu_Add",)
+TONG_ADD_ALWAYS = ("ZTong/Tong_jichu_Add_Always",)
+ALWAYS_NOTE = "ZTest Always: drawn over the scene (#depth always)"
 EFFECT_COMMON = ("ZTong/Effect_Common", "ZTong/Effect_Common_VertexOffset")
 
 
@@ -136,7 +147,7 @@ def _png_bytes(png, max_size=1024):
     return buf.getvalue()
 
 
-def tong_ab_material(mat, shader, png_for_guid, srgb_of, linear_colour):
+def tong_ab_material(mat, shader, png_for_guid, srgb_of, linear_colour, dst_blend=10.0):
     """ZTong/Tong_jichu_AB (and AB_2_Mask) as the Effect_Common class the app draws.
 
     The decompiled fragments (web/data/shaders/ZTong_Tong_jichu_AB*_p0_*.frag.wgsl):
@@ -148,20 +159,44 @@ def tong_ab_material(mat, shader, png_for_guid, srgb_of, linear_colour):
     With the masks unset (white), single channel, desaturate and the vertex
     colour switch off and no UVadd, that is Effect_Common with _MainPow (1,1,1,0),
     no plus, no mask, _DstBlend 10: rgb = tex * _Color * vc, a = tex.a * _Color.a * vc.a,
-    laid over - the same picture. Anything else is refused with the reason."""
+    laid over - the same picture. Anything else is refused with the reason.
+
+    Tong_jichu_Add_Always (dst_blend 1): rgb = tex.rgb * _Color.rgb * vc.rgb,
+    a = tex.a * _Color.a * vc.a * mask, added premultiplied - with the mask unset,
+    Effect_Common added (_DstBlend 1) the same way."""
     f, tex = mat["floats"], mat["textures"]
-    why = []
+    why, notes = [], []
+    # AB_2_Mask's first mask (texcoord3.xy: uv + t * (_Tex_Mask_U, _V), turned by
+    # _Tex_Mssk_Ang, then _Tex_Mask_ST; alpha *= luma(mask.rgb) * mask.a, or mask.a /
+    # mask.r^2 by _Tex_Mask_IsSingleChannel) is Effect_Common's mask layer exactly
+    # with that product baked into the picture's alpha (mask_layer)
+    mask_ok = (shader == "ZTong/Tong_jichu_AB_2_Mask" and "_Tex_Mask" in tex
+               and all(abs(f.get(k, 0.0)) < 1e-6 for k in ("_Tex_Mask_U_Z", "_Tex_Mask_V_W", "_Tex_Mssk_Ang",
+                                                            "_World_Mask", "_World_Mask_View")))
+    # its _Tex_UVadd nudges the picture's uv by luma(uvadd) * intensity - a wobble
+    # Effect_Common's noise (a lerp toward the noise) does not draw: left out, said so
+    uvadd_ok = shader == "ZTong/Tong_jichu_AB_2_Mask"
     if "_Tex" not in tex:
         why.append("no _Tex")
     for slot in ("_Tex_Mask", "_Tex_Mask_2", "_Tex_UVadd"):
-        if slot in tex:
+        if slot in tex and not ((slot == "_Tex_Mask" and mask_ok) or (slot == "_Tex_UVadd" and uvadd_ok)):
             why.append(f"{slot} is set")
     for k in ("_Tex_IsSingleChannel", "_Desaturate", "_Vertex_Color", "_Color_Alpha_X", "_Tex_Rotate",
               "_Tex_U_X", "_Tex_V_Y", "_World_Mask", "_Tex_World_Mask", "_Tex_UVadd_Intensity"):
+        if k == "_Tex_UVadd_Intensity" and uvadd_ok:
+            continue
         if abs(f.get(k, 0.0)) > 1e-6:
             why.append(f"{k} = {f[k]}")
     if why:
         return None, f"{shader}: {', '.join(why)} - not the Effect_Common subset"
+    if "_Tex_UVadd" in tex and abs(f.get("_Tex_UVadd_Intensity", 0.0)) > 1e-6:
+        notes.append(f"_Tex_UVadd uv wobble (intensity {f['_Tex_UVadd_Intensity']:g}) not carried")
+    mask = None
+    if "_Tex_Mask" in tex:
+        mask = mask_layer(tex["_Tex_Mask"], f, png_for_guid, srgb_of)
+        if mask is None:
+            return None, f"{shader}: _Tex_Mask picture not found"
+        notes.append("_Tex_Mask carried as the mask layer")
     st = tex["_Tex"]
     png = png_for_guid(st["guid"])
     if not png:
@@ -190,9 +225,53 @@ def tong_ab_material(mat, shader, png_for_guid, srgb_of, linear_colour):
         "plusMode": 0,
         "redAlphaMask": False,
         "maskStrength": 0.0,
-        "dstBlend": 10.0,
+        "dstBlend": float(dst_blend),
     }
-    return effect, None
+    if mask:
+        effect["layers"]["mask"] = mask
+    return effect, ("; ".join(notes) or None)
+
+
+def mask_layer(st, f, png_for_guid, srgb_of):
+    """Tong_jichu_AB_2_Mask's _Tex_Mask as an Effect_Common mask layer: the value the
+    fragment multiplies alpha by - luma(rgb) * a (rgb as sampled: linear for an sRGB
+    picture), a under IsSingleChannel 1, r * r under 2 - baked into the alpha of a
+    white picture, which the mask layer multiplies alpha by (redAlphaMask off,
+    maskStrength 0). Its uv as the main layer's: (u + t * _Tex_Mask_U, v + t *
+    _Tex_Mask_V), turned (no angle here), then _Tex_Mask_ST."""
+    png = png_for_guid(st["guid"])
+    if not png:
+        return None
+    im = np.asarray(Image.open(png).convert("RGBA"), dtype=np.float64) / 255.0
+    rgb, a = im[..., :3], im[..., 3]
+    if srgb_of(st["guid"]):
+        rgb = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    single = f.get("_Tex_Mask_IsSingleChannel", 0.0)
+    if single > 1.5:
+        m = rgb[..., 0] * rgb[..., 0]
+    elif single > 0.5:
+        m = a
+    else:
+        m = (rgb @ np.array([0.3, 0.59, 0.11])) * a
+    out = np.zeros(im.shape, np.uint8)
+    out[..., :3] = 255
+    out[..., 3] = np.clip(np.round(m * 255), 0, 255).astype(np.uint8)
+    img = Image.fromarray(out, "RGBA")
+    if max(img.size) > 1024:
+        k = 1024 / max(img.size)
+        img = img.resize((max(1, round(img.width * k)), max(1, round(img.height * k))), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, "PNG", optimize=True)
+    return {
+        "png": base64.b64encode(buf.getvalue()).decode("ascii"),
+        "scale": [float(st["scale"][0]), float(st["scale"][1])],
+        "offset": [float(st["offset"][0]), float(st["offset"][1])],
+        "rotation": 0.0,
+        "tiling": True,
+        "speed": [float(f.get("_Tex_Mask_V", 0.0)), float(f.get("_Tex_Mask_U", 0.0))],
+        # the value is in alpha, which no decode touches
+        "srgb": False,
+    }
 
 
 class Materials:
@@ -257,13 +336,21 @@ class Materials:
             eff = self.bake.live_effect(m, self.png_for_guid, always=True,
                                         asset_for_guid=lambda g: self.proj.path(g) if g != "__white__" else None)
             note = f"{', '.join(filled)} unset - the shader's white" if filled else None
+            # _ZTest 8 (Always): drawn over the scene - X309's lighthouse beam glow8
+            if eff and float((mat.get("floats") or {}).get("_ZTest", 4)) == 8:
+                eff = {**eff, "overlay": True}
+                note = "; ".join(x for x in (note, ALWAYS_NOTE) if x)
             out = (eff, None, note) if eff else (None, None, f"{shader}: a picture is missing")
         elif mat and shader in TONG_ADD:
             eff = self.bake.tong_add_effect(mat, self.png_for_guid, asset_for_guid=self.proj.path)
             out = (eff, None, None) if eff else (None, None, f"{shader}: no _Tex")
-        elif mat and shader in TONG_AB:
-            eff, why = tong_ab_material(mat, shader, self.png_for_guid, self.srgb_of, self.bake._linear_colour)
-            out = (eff, None, why)
+        elif mat and shader in TONG_AB + TONG_ADD_ALWAYS:
+            eff, why = tong_ab_material(mat, shader, self.png_for_guid, self.srgb_of, self.bake._linear_colour,
+                                        dst_blend=1.0 if shader in TONG_ADD_ALWAYS else 10.0)
+            if eff and shader.endswith("_Always"):
+                eff = {**eff, "overlay": True}
+            note = "; ".join(x for x in (why, ALWAYS_NOTE if eff and shader.endswith("_Always") else None) if x)
+            out = (eff, None, note or None)
         elif mat:
             out = (None, None, f"{shader} has no particle effect in reze-design")
         eff, _, note = out
@@ -424,21 +511,29 @@ def build(ctx, frames, blob, particle_renderers, tracks):
         alive = np.array([m is not None and len(m[3]) > 0 for m in meshes])
         on_idx = np.nonzero(tr["on"])[0]
         Ms = tr["M"][on_idx]
-        if np.abs(Ms - Ms[0]).max() > 1e-5:
-            print(f"  warning: {r['path']} moves during the sequence - its emitter stands at its first pose")
         M = Ms[0]
+        moving = bool(np.abs(Ms - Ms[0]).max() > 1e-5)
         mode = int(renderer.get("m_RenderMode", 0))
         if mode == 4:
-            # a mesh particle: a prop when it is one still particle
-            still = spec["max"] == 1 and spec["speed"]["hi"] == 0 and spec["speed"]["lo"] == 0
-            first = next((m for m in meshes if m is not None), None)
-            if still and first is not None and r.get("mesh"):
-                mesh_props.append((r, first))
+            # a mesh particle: the generator draws cards only, so its particles
+            # become a prop - each one its mesh at the pose the recording baked
+            # it in, frame by frame, shown while it is alive
+            if not r.get("mesh"):
+                skipped.append((r["path"], "mesh particles (render mode 4) with no mesh"))
+            elif not any(m is not None and len(m[3]) for m in meshes):
+                skipped.append((r["path"], "mesh particles (render mode 4) never alive in the recording"))
+            elif not (renderer.get("m_Materials") or []) or not any(
+                    isinstance(m, dict) and m.get("guid") for m in renderer.get("m_Materials") or []):
+                skipped.append((r["path"], "mesh particles (render mode 4) with no material - draws nothing"))
             else:
-                skipped.append((r["path"], "mesh particles (render mode 4) the effect generator does not draw"))
+                mesh_props.append((r, meshes))
             continue
+        if moving:
+            print(f"  {r['path']} moves during the sequence - its emitter follows the recording")
         if mode not in (0, 1):
-            skipped.append((r["path"], f"render mode {mode} the effect generator does not draw"))
+            skipped.append((r["path"], "render mode 5 (None): no particle geometry in the game either"
+                            + (" - its Lights module's lamps are not carried" if str((found["ps"].get("LightsModule") or {}).get("enabled", 0)) == "1" else "")
+                            if mode == 5 else f"render mode {mode} the effect generator does not draw"))
             continue
         guids = [m.get("guid") for m in (renderer.get("m_Materials") or []) if isinstance(m, dict) and m.get("guid")]
         if not guids:
@@ -457,12 +552,14 @@ def build(ctx, frames, blob, particle_renderers, tracks):
                             "on": np.zeros(n, bool)}
             order.append(key)
         c = classes[key]
-        c["emitters"].append({"path": r["path"], "rid": r["id"], "frame": frame, "M": M, "meshes": meshes})
+        c["emitters"].append({"path": r["path"], "rid": r["id"], "frame": frame, "M": M, "meshes": meshes,
+                              "motion": emitter_motion(tr, M) if moving else None, "alive": alive})
         c["alive"] |= alive
         c["on"] |= tr["on"]
 
     # ---- the classes, their points, their pictures
     files, points, out_classes, summaries = {}, [], [], []
+    motion = {}     # point bone -> [n, 7] (VMD translation, quaternion xyzw) of a moving emitter
     taken = set()
     for k, key in enumerate(order):
         c = classes[key]
@@ -474,12 +571,18 @@ def build(ctx, frames, blob, particle_renderers, tracks):
             for axis, length in ((z, size_k), (x, shape_k)):
                 i += 1
                 points.append((f"{prefix}{i:03d}", tuple(head), tuple(SCALE * FLIP @ (axis * length))))
+                if e["motion"] is not None:
+                    motion[f"{prefix}{i:03d}"] = e["motion"]
         name = c["label"]
         while name in taken:
             name += "'"
         taken.add(name)
         cls = {"name": name, "prefix": prefix, "emitters": len(c["emitters"]), "metresPerUnit": METRES_PER_UNIT,
-               "spec": c["spec"], "material": c["material"]}
+               "spec": c["spec"], "material": {k: v for k, v in c["material"].items() if k != "overlay"},
+               **({"overlay": True} if c["material"].get("overlay") else {})}
+        starts = emitter_starts(c)
+        if starts:
+            cls["starts"] = starts
         out_classes.append(cls)
         tex_entries = []
         for slot, t in enumerate(c["textures"]):
@@ -514,7 +617,70 @@ def build(ctx, frames, blob, particle_renderers, tracks):
                  "transform": {"position": [0, 0, 0], "rotation": [0, 0, 0], "scale": 1}}
     verify = [verify_class(classes[key], out_classes[k], frames) for k, key in enumerate(order)]
     return {"files": files, "model": model, "effects": effects, "classes": summaries, "mesh_props": mesh_props,
-            "skipped": skipped, "verify": verify}
+            "skipped": skipped, "verify": verify, "motion": motion}
+
+
+def emitter_starts(c):
+    """A one shot's emitters, each in point order: seconds after the class's window
+    starts that its own particles start (two systems of one kind whose start delays
+    differ). The same in every window of the class, or None (all start with it)."""
+    if c["spec"]["looping"]:
+        return None
+    wins = runs(c["alive"])
+    starts = []
+    for e in c["emitters"]:
+        offs = []
+        for a, b in wins:
+            on = np.nonzero(e["alive"][a:b])[0]
+            if len(on):
+                offs.append(int(on[0]))
+        if offs and max(offs) - min(offs) > 1:
+            return None
+        starts.append(round(min(offs) / RATE, 4) if offs else 0.0)
+    return starts if any(starts) else None
+
+
+def _quat(R):
+    """Rotation matrix -> quaternion (x, y, z, w)."""
+    w = math.sqrt(max(0.0, 1 + R[0, 0] + R[1, 1] + R[2, 2])) / 2
+    x = math.sqrt(max(0.0, 1 + R[0, 0] - R[1, 1] - R[2, 2])) / 2
+    y = math.sqrt(max(0.0, 1 - R[0, 0] + R[1, 1] - R[2, 2])) / 2
+    z = math.sqrt(max(0.0, 1 - R[0, 0] - R[1, 1] + R[2, 2])) / 2
+    x = math.copysign(x, R[2, 1] - R[1, 2])
+    y = math.copysign(y, R[0, 2] - R[2, 0])
+    z = math.copysign(z, R[1, 0] - R[0, 1])
+    q = np.array([x, y, z, w])
+    return q / np.linalg.norm(q)
+
+
+def _basis(M):
+    """The emitter's orthonormal frame (x, y, z columns) from its matrix."""
+    z = M[:3, 2] / (np.linalg.norm(M[:3, 2]) or 1.0)
+    x = M[:3, 0] - z * np.dot(M[:3, 0], z)
+    x /= np.linalg.norm(x) or 1.0
+    return np.stack([x, np.cross(z, x), z], axis=1)
+
+
+def emitter_motion(tr, M_rest):
+    """A moving emitter (one on her hand) as its point bones' VMD motion, per frame:
+    translation from the rest head and the rotation taking the rest frame to the
+    frame's (PMX space), the nearest pose held where the system is off. The size
+    and shape lengths stay the rest's."""
+    on, Ms = tr["on"], tr["M"]
+    n = len(on)
+    head0 = SCALE * FLIP @ M_rest[:3, 3]
+    B0 = _basis(M_rest)
+    out = np.zeros((n, 7))
+    first = int(np.nonzero(on)[0][0])
+    last = Ms[first]
+    for f in range(n):
+        if on[f]:
+            last = Ms[f]
+        out[f, :3] = SCALE * FLIP @ last[:3, 3] - head0
+        out[f, 3:] = _quat(FLIP @ _basis(last) @ B0.T @ FLIP)
+        if f and np.dot(out[f, 3:], out[f - 1, 3:]) < 0:
+            out[f, 3:] = -out[f, 3:]
+    return out
 
 
 def found_scale(yamls, found):
@@ -545,6 +711,12 @@ def verify_class(c, cls, frames):
     r = s["emission"]["rate"]
     gen_rate = (r["lo"] + r["hi"]) / 2 if r.get("mode") == 3 else r["hi"]
     pool = max(1, min(s["max"], math.floor(((gen_rate * meanLife + burst) if s["emission"]["on"] else 1) + 0.5) or 1))
+    if not s["looping"] and s["emission"]["on"]:
+        # a one shot's slots are its emission events (lib/unity-particles.ts oneShotEvents)
+        events = sum(max(0, round(b["count"])) * max(1, b["cycles"]) for b in s["emission"]["bursts"])
+        events += math.floor(gen_rate * s.get("duration", 5.0) + 1e-6) if gen_rate > 0 else 0
+        if events:
+            pool = max(1, min(s["max"], events))
     counts, dist, spread, ratio, lives = [], [], [], [], []
     rate_s = 1.0 / 30
     for e in c["emitters"]:

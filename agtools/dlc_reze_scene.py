@@ -21,7 +21,10 @@ pipeline's AG_dlc_scene/<skin>/<seq>/{character.vmd,camera.vmd,audio.wav}. Write
     props/<name>/<name>.pmx    one prop per moving object group of the sequence
     props/<name>/<name>.vmd    its motion: a bone per part, scale + on/off as morphs
     props/<name>/look.json     the game's materials (engine setModelNativeLook),
-                               named by the prop's `look`
+                               named by the prop's `look`; a material whose
+                               values the take animates (timeline material
+                               curves) carries `uniforms`, sparse keys on the
+                               clip clock (uniform_tracks)
     props/<name>/tex/ shaders/ what the PMX and the look name
     character.vmd camera.vmd audio.wav
                                her retargeted motion (face included), the camera
@@ -33,6 +36,9 @@ pipeline's AG_dlc_scene/<skin>/<seq>/{character.vmd,camera.vmd,audio.wav}. Write
                                WGSL, pictures and class) and particles/*.png
                                (dlc_particles.py); the effects themselves are in
                                settings.background.effects, by value
+    scene.json settings.lights the recorded lamps whose layer mask reaches her,
+                               in the engine's units (scene_lights), keyed over
+                               the take where the game animates them
 
 Props are the renderers under the character's root (Char/<root>/...) that are
 neither the character (SimPipeline/Character/* materials) nor particle systems:
@@ -89,9 +95,45 @@ def mat4(a):
 
 
 def load_frames(data, seq):
+    """The recorded frames on the clip clock: frames[k] is clip frame k, the frame
+    her motion, the camera and the voice (AG_dlc_scene) are keyed on. AGDlcRecord
+    writes a line once the timeline has drawn, and the director has already
+    stepped a frame by then: its first line is clip frame 1 (102201 touch1: the
+    moon's own curve is keyed at 1.8019 on clip frame 10 and the recording shows
+    it on line 9). Its "clipTime" says which frame each line is; the frames
+    before the first hold the first line's state."""
     frames = [json.loads(l) for l in open(os.path.join(data, f"{seq}.frames.jsonl"), encoding="utf-8") if l.strip()]
     blob = open(os.path.join(data, f"{seq}.frames.bin"), "rb").read()
+    lead = clip_lead(frames, seq)
+    if lead > 0:
+        dt = frames[1]["time"] - frames[0]["time"] if len(frames) > 1 else 1.0 / RATE
+        frames = [{**frames[0], "f": -k, "time": frames[0]["time"] - k * dt, "lead": True}
+                  for k in range(lead, 0, -1)] + frames
     return frames, blob
+
+
+def clip_lead(frames, seq):
+    """The clip frame of the recording's first line. Without "clipTime" (a recording
+    made before AGDlcRecord wrote it) the player's order says 1: the director and
+    the recorder start in one frame, and the director steps before the line."""
+    if not frames or "clipTime" not in frames[0]:
+        return 1
+    # the last line is drawn after the director has stopped (its time back at 0)
+    at = [round(fr["clipTime"] * RATE) - i for i, fr in enumerate(frames) if fr.get("clipTime", 0) > 0 or i == 0]
+    if len(set(at)) > 1:
+        print(f"  warning: {seq}: the recording drifts against the clip clock (line k is clip frame k + "
+              f"{min(at)}..{max(at)}) - aligned at its first line")
+    return max(0, at[0])
+
+
+def rid_key(rid):
+    """Sort key of a renderer id ("r12") or a slot of one ("r12#3")."""
+    return tuple(int(x) for x in re.findall(r"\d+", rid))
+
+
+def base_rid(rid):
+    """The renderer a part id belongs to ("r12#3" -> "r12")."""
+    return rid.split("#", 1)[0]
 
 
 def dense_tracks(frames, blob, scene, rids):
@@ -117,6 +159,9 @@ def dense_tracks(frames, blob, scene, rids):
         for i, fr in enumerate(frames):
             rec = fr["r"].get(rid)
             if rec:
+                if rec.get("on") and "mpb" not in rec:
+                    # the whole state is written when it changes: no block is an empty one
+                    cur.pop("mpb", None)
                 cur.update({k: v for k, v in rec.items() if k not in ("bones", "particles", "blend")})
                 if r["kind"] == "skinned" and rec.get("bones"):
                     off, _cnt = rec["bones"]
@@ -154,6 +199,9 @@ def ascii_name(s, limit, taken, fallback="p"):
 def discover(scene, seq_names, seq):
     """{group: [renderer ids]} of this sequence's props, and the particle renderers."""
     mats = {m["id"]: m for m in scene["materials"]}
+    # her model's folder: a rigid mesh in her hand (weapon01..03) is a prop even
+    # under a character shader
+    root = stage_native.cast_root(scene, mats)
     groups, particles = {}, []
     for r in scene["renderers"]:
         parts = r["path"].split("/")
@@ -168,7 +216,7 @@ def discover(scene, seq_names, seq):
         if r["kind"] == "particles":
             particles.append(r)
             continue
-        if stage_native.is_cast(r, mats):
+        if stage_native.is_cast(r, mats, root):
             continue
         groups.setdefault(group, []).append(r["id"])
     return groups, particles
@@ -268,19 +316,24 @@ def _text(s):
     return struct.pack("<i", len(b)) + b
 
 
-def write_pmx(name, textures, vertices, materials, bones, morphs, comment=""):
+def write_pmx(name, textures, vertices, materials, bones, morphs, comment="", add_uv=None):
     """vertices: list of (pos3, nrm3, uv2, bone); materials: dicts with name, tex
     (index or -1), flags, indices (flat list); bones: (name, pos3, parent);
-    morphs: (name, [(vertex, offset3)])."""
+    morphs: (name, [(vertex, offset3)]) vertex morphs, or (name, [(vertex,
+    offset4)], 4) additional-UV1 morphs; add_uv: per vertex a vec4 for the one
+    additional UV channel (the game's vertex colour), or None for none."""
     out = io.BytesIO()
     w = out.write
     w(b"PMX " + struct.pack("<f", 2.0))
-    w(bytes([8, 0, 0, 4, 4, 4, 4, 4, 4]))  # utf-16, no add-UV, 4-byte indices
+    # utf-16, the additional UV channels, 4-byte indices
+    w(bytes([8, 0, 1 if add_uv is not None else 0, 4, 4, 4, 4, 4, 4]))
     for s in (name, name, comment, comment):
         w(_text(s))
     w(struct.pack("<i", len(vertices)))
-    for p, nr, uv, b in vertices:
+    for k, (p, nr, uv, b) in enumerate(vertices):
         w(struct.pack("<3f3f2f", *p, *nr, *uv))
+        if add_uv is not None:
+            w(struct.pack("<4f", *add_uv[k]))
         w(bytes([0]) + struct.pack("<i", b))  # BDEF1
         w(struct.pack("<f", 0.0))  # edge scale
     idx = [i for m in materials for i in m["indices"]]
@@ -306,11 +359,12 @@ def write_pmx(name, textures, vertices, materials, bones, morphs, comment=""):
         w(struct.pack("<H", 0x0002 | 0x0004 | 0x0008 | 0x0010))
         w(struct.pack("<3f", 0, 0, 0))  # tail offset
     w(struct.pack("<i", len(morphs)))
-    for mn, offs in morphs:
+    for mn, offs, *kind in morphs:
+        kind = kind[0] if kind else 1
         w(_text(mn) + _text(mn))
-        w(bytes([4, 1]) + struct.pack("<i", len(offs)))
+        w(bytes([4, kind]) + struct.pack("<i", len(offs)))
         for v, o in offs:
-            w(struct.pack("<i3f", v, *o))
+            w(struct.pack("<i3f" if kind == 1 else "<i4f", v, *o))
     # display frames: Root (the root bone), 表情 (the morphs), and the parts
     w(struct.pack("<i", 3))
     w(_text("Root") + _text("Root") + bytes([1]) + struct.pack("<i", 1) + bytes([0]) + struct.pack("<i", 0))
@@ -353,11 +407,14 @@ def read_pmx(b):
     text(), text(), text()
     nv = struct.unpack("<i", take(4))[0]
     pos, uv, vb = np.zeros((nv, 3)), np.zeros((nv, 2)), np.zeros(nv, int)
+    add_uv = np.zeros((nv, 4)) if addv else None
     for i in range(nv):
         pos[i] = struct.unpack("<3f", take(12))
         take(12)
         uv[i] = struct.unpack("<2f", take(8))
-        take(16 * addv)
+        if addv:
+            add_uv[i] = struct.unpack("<4f", take(16))
+            take(16 * (addv - 1))
         wt = take(1)[0]
         assert wt == 0, "BDEF1 only"
         vb[i] = ix(bsz)
@@ -391,19 +448,19 @@ def read_pmx(b):
         take(bsz) if fl & 1 else take(12)
         assert not fl & ~0x1F, "plain bones only"
         bones.append({"name": bn, "pos": np.array(bp), "parent": parent})
-    morphs = {}
+    morphs, uv_morphs = {}, {}
     for _ in range(struct.unpack("<i", take(4))[0]):
         mn = text()
         text()
         _panel, kind = take(2)
-        assert kind == 1
+        assert kind in (1, 4), f"morph {mn}: vertex or additional-UV1 morphs only"
         offs = []
         for _ in range(struct.unpack("<i", take(4))[0]):
             v = ix(vsz, True)
-            offs.append((v, np.array(struct.unpack("<3f", take(12)))))
-        morphs[mn] = offs
+            offs.append((v, np.array(struct.unpack("<3f" if kind == 1 else "<4f", take(12 if kind == 1 else 16)))))
+        (morphs if kind == 1 else uv_morphs)[mn] = offs
     return {"name": name, "pos": pos, "uv": uv, "bone": vb, "indices": idx, "textures": texs,
-            "materials": mats, "bones": bones, "morphs": morphs}
+            "materials": mats, "bones": bones, "morphs": morphs, "add_uv": add_uv, "uv_morphs": uv_morphs}
 
 
 # ---------------------------------------------------------------- VMD
@@ -497,6 +554,18 @@ def mesh_arrays(data, mesh):
     return stream("POSITION"), stream("NORMAL"), stream("TEXCOORD0"), subs
 
 
+def mesh_colors(data, mesh):
+    """The mesh's own vertex colours [n, 4] as Unity binds them (as stored, no
+    colour-space change), or None when it has no COLOR stream (Unity binds white)."""
+    if "COLOR" not in mesh["streams"]:
+        return None
+    off, dim = mesh["streams"]["COLOR"]
+    n = mesh["vertexCount"]
+    raw = open(os.path.join(data, "meshes", f"{mesh['id']}.bin"), "rb").read()
+    c = np.frombuffer(raw, np.float32, n * dim, off).reshape(n, dim).astype(np.float64)
+    return np.c_[c, np.ones((n, 4 - dim))] if dim < 4 else c[:, :4]
+
+
 def material_values(m, tex_info, mpb, flip_v=True):
     """stage_native's material handling, with the renderer's property block on top.
     _ST's v is remapped to PMX's flipped v: Unity's v*s + o sampled on a v-up image
@@ -525,8 +594,95 @@ def material_values(m, tex_info, mpb, flip_v=True):
     return values, slots
 
 
+def uniform_tracks(m, tex_info, tr, slot, mid, n, tol=1e-4):
+    """The values of one part's material slot that the take animates (Unity's
+    timeline material curves land in the renderer's property block), as sparse
+    keys on the clip clock - {name: [[frame, value], ...]}, the value a number or
+    a vector as in the look's `values`, linear between keys and held past the
+    ends - and notes on what cannot be keyed.
+
+    A frame counts when the part is on and its slot holds `mid`; the frames
+    between hold the last counted value (the first one before it), so no key
+    ramps across a gap. A run that the line through its ends meets within tol
+    (relative to the channel's size) keeps its two ends only. A value that holds
+    over the take is not keyed: the rest frame's `values` carry it."""
+    on = tr["on"].copy()
+    for f, st in enumerate(tr["states"]):
+        mats = st.get("mats")
+        if mats is not None and (slot >= len(mats) or mats[slot] != mid):
+            on[f] = False
+    idx = np.nonzero(on)[0]
+    if not len(idx):
+        return {}, []
+    cache, per_frame = {}, {}
+    for f in idx:
+        mpb = tr["states"][f].get("mpb") or {}
+        k = json.dumps(mpb, sort_keys=True)
+        if k not in cache:
+            cache[k] = material_values(m, tex_info, mpb)
+        per_frame[int(f)] = k
+    if len(cache) < 2:
+        return {}, []
+    out, notes = {}, []
+    if len({json.dumps(sl, sort_keys=True) for _, sl in cache.values()}) > 1:
+        notes.append(f"{m['name']}: its textures are swapped during the sequence - the rest frame's are drawn")
+    # every frame's sample: the last counted frame's (the first counted one before it)
+    held = idx[np.clip(np.searchsorted(idx, np.arange(n), "right") - 1, 0, len(idx) - 1)]
+    for name in sorted({name for vals, _ in cache.values() for name in vals}):
+        if len({json.dumps(vals.get(name)) for vals, _ in cache.values()}) < 2:
+            continue
+        samples = [cache[per_frame[int(f)]][0].get(name) for f in held]
+        sizes = {1 if isinstance(v, (int, float)) else
+                 len(v) if isinstance(v, list) and all(isinstance(x, (int, float)) for x in v) else None
+                 for v in samples}
+        if None in sizes or len(sizes) > 1:
+            notes.append(f"{m['name']}: {name} changes during the sequence but is not one number or vector "
+                         f"throughout - the rest frame's is drawn")
+            continue
+        scalar = isinstance(samples[0], (int, float))
+        arr = np.asarray(samples, np.float64).reshape(n, -1)
+        keys = _sparse(list(range(n)), arr, tol * max(1.0, float(np.abs(arr).max())))
+        # a hold at either end is the held end key's alone
+        if len(keys) > 2 and np.array_equal(arr[keys[0]], arr[keys[1]]):
+            keys = keys[1:]
+        if len(keys) > 2 and np.array_equal(arr[keys[-1]], arr[keys[-2]]):
+            keys = keys[:-1]
+        out[name] = [[int(f), round(float(arr[f, 0]), 6) if scalar else [round(float(x), 6) for x in arr[f]]]
+                     for f in keys]
+    return out, notes
+
+
+def split_mirrored(rids, tracks):
+    """A part mirrored on some of its frames only (a mesh particle the Renderer
+    module flips, X309's lighthouse glow) is not one rest mesh moved by T R S:
+    it becomes two parts - its plain frames under its own id, its mirrored ones
+    under <id>#m, each on only on its own frames (tracks gains the second).
+    Returns the part ids."""
+    out = []
+    for rid in rids:
+        tr = tracks[rid]
+        idx = np.nonzero(tr["on"])[0]
+        neg = np.array([np.linalg.det(tr["M"][i, :3, :3]) < 0 for i in idx], bool)
+        if not len(idx) or neg.all() or not neg.any():
+            out.append(rid)
+            continue
+        for pid, want in ((rid, False), (f"{rid}#m", True)):
+            on = np.zeros_like(tr["on"])
+            on[idx[neg == want]] = True
+            tracks[pid] = {**tr, "on": on, "states": [{**st, "on": int(on[f])} for f, st in enumerate(tr["states"])]}
+            out.append(pid)
+        print(f"  {rid}: mirrored on {int(neg.sum())} of its {len(idx)} frames - split into a plain and a mirrored part")
+    return out
+
+
+class Untranslated(Exception):
+    """A prop's material whose shader did not translate (a screen-space
+    distortion reads the frame behind it): the prop is left out, with a note."""
+
+
 def build_prop(ctx, group, rids, tracks, taken_props):
     """The prop's files {relative path: bytes}, its windows and a summary."""
+    rids = split_mirrored(rids, tracks)
     data, scene, variants = ctx["data"], ctx["scene"], ctx["variants"]
     rends = {r["id"]: r for r in scene["renderers"]}
     meshes = {m["id"]: m for m in scene["meshes"]}
@@ -551,21 +707,27 @@ def build_prop(ctx, group, rids, tracks, taken_props):
             files[rel] = open(os.path.join(data, "textures", t["files"][0]), "rb").read()
             tex_index[tid] = len(textures)
             textures.append(rel)
-            look_tex[tid] = {"file": rel, "srgb": bool(t["srgb"])}
+            # wrap and filter as the game imported it: a clamped mask (the ripple
+            # rings', the sweeps') read past its edge is its border, not its far side
+            look_tex[tid] = {"file": rel, "srgb": bool(t["srgb"]), "wrap": t.get("wrap", "Repeat"),
+                             "filter": t.get("filter", "Bilinear")}
         return tid
 
     bones = [(ROOT_BONE, (0.0, 0.0, 0.0), -1)]
     vertices, pmx_mats, morphs = [], [], []
+    # the game's vertex colour per vertex (PMX additional UV 1), and whether any
+    # part has one other than Unity's white
+    colors, colored = [], False
     bone_keys, morph_keys = [], []
     specs = {}
     parts = []
     taken_bones, taken_mats = set(), set()
     on_any = np.zeros(n, bool)
-    for rid in sorted(rids, key=lambda s: int(s[1:])):
+    for rid in sorted(rids, key=rid_key):
         tr = tracks[rid]
         if not tr["on"].any():
             continue
-        r = rends[rid]
+        r = rends[base_rid(rid)]
         rel_path = r["path"]
         pname = ascii_name(rel_path.split("/")[-1], 12, taken_bones)
         sol = solve_part(tr, f"{name}/{pname}")
@@ -596,13 +758,38 @@ def build_prop(ctx, group, rids, tracks, taken_props):
             d = rel @ e
             offs = [(base + k, tuple(-d[k] * e)) for k in range(len(P)) if abs(d[k]) > 1e-9]
             morphs.append((f"{pname}_s{AXES[a]}", offs))
+        # the vertex colour the game's shader reads: the mesh's own (a glow disc's
+        # rim at alpha 0) times, for a mesh particle, its particle's colour over
+        # life (tr["color"], linear) - a channel that holds is baked in, one that
+        # changes is an additional-UV morph per channel, weight w scaling it by
+        # 1 - w (the scale morphs' convention)
+        mc = mesh_colors(data, mesh)
+        col = mc if mc is not None else np.ones((len(P), 4))
+        vcol = col.copy()
+        k_col = tr.get("color")
+        if mc is not None or k_col is not None:
+            colored = True
+        if k_col is not None:
+            lit = k_col[tr["on"]]
+            for a in range(4):
+                if lit[:, a].max() - lit[:, a].min() < 0.25 / 255:
+                    vcol[:, a] *= float(lit[:, a].mean())
+                    continue
+                cname = f"{pname}_c{'rgba'[a]}"
+                offs = [(base + v, tuple(-col[v, a] if c == a else 0.0 for c in range(4)))
+                        for v in range(len(P)) if col[v, a] > 0]
+                morphs.append((cname, offs, 4))
+                wc = 1.0 - k_col[:, a:a + 1]
+                for f in keep_frames(wc):
+                    morph_keys.append((cname, f, float(wc[f, 0])))
+        colors.extend(tuple(c) for c in vcol)
         # materials: one per submesh, the game's own on top as a native look
         st = tr["states"][sol["rest"]]
         mat_ids = st.get("mats") or r["materials"]
         lit = [s for s in tr["states"] if s.get("on")]
-        if len({json.dumps(s.get("mats") or r["materials"]) for s in lit}) > 1 or \
-                len({json.dumps(s.get("mpb") or {}, sort_keys=True) for s in lit}) > 1:
-            print(f"  note: {pname}: its materials or property block change during the sequence - the rest frame's are used")
+        if len({json.dumps(s.get("mats") or r["materials"]) for s in lit}) > 1:
+            print(f"  note: {pname}: its materials are swapped during the sequence - the rest frame's are drawn "
+                  f"(a slot's values are keyed over the frames it holds the rest frame's material)")
         if len(mat_ids) > len(subs):
             print(f"  note: {pname}: {len(mat_ids)} materials over {len(subs)} submeshes - extra ones dropped")
         for si, tris in enumerate(subs):
@@ -613,6 +800,15 @@ def build_prop(ctx, group, rids, tracks, taken_props):
             if np.linalg.det(sol["mirror"]) < 0:
                 tris = tris.reshape(-1, 3)[:, ::-1].reshape(-1)
             values, slots = material_values(gm, tex_info, st.get("mpb"))
+            keyed, knotes = uniform_tracks(gm, tex_info, tr, si, mid, n)
+            for note in knotes:
+                print(f"  note: {pname}: {note}")
+            if keyed:
+                print(f"  {pname}: {gm['name']} keyed over the take - "
+                      + ", ".join(f"{k} {len(v)} keys" for k, v in keyed.items()))
+                for k, v in keyed.items():
+                    # what the material draws with before the first sample is applied
+                    values.setdefault(k, v[0][1])
             look_slots = {k: texture(t) for k, t in slots.items()}
             look_slots = {k: v for k, v in look_slots.items() if v}
             main = next((look_slots[k] for k in ("_MainTex", "_AlbedoTex", "_BaseMap") if k in look_slots), None)
@@ -626,6 +822,11 @@ def build_prop(ctx, group, rids, tracks, taken_props):
                     continue
                 passes.append({"lightMode": p["lightMode"], "shader": p["variant"], "state": p.get("state") or {}})
                 used_shaders.add(p["variant"])
+            if not passes and gm["id"] in variants:
+                # a look material with no pass to draw falls back to the PMX's own
+                # shading - an opaque, untinted sheet (102201's ripple sweeps)
+                raise Untranslated(f"{mid} {gm['name']} ({gm['shader']}) has no translated pass in variants.json: "
+                                   f"its shader did not translate - see agtools/dlc_web.py's problems")
             cull = next((p["state"].get("Cull", [2])[0] for p in passes if p["lightMode"] in ("FORWARDBASE", "ALWAYS")), 2)
             transparent = gm["queue"] > 2500
             flags = (0x01 if str(cull) in ("0", "Off") else 0)
@@ -636,12 +837,14 @@ def build_prop(ctx, group, rids, tracks, taken_props):
             mname = ascii_name(f"{pname}_{gm['name']}", 64, taken_mats)
             pmx_mats.append({"name": mname, "tex": tex_index[main] if main else -1, "flags": flags,
                              "indices": (tris + base).tolist()})
-            key = json.dumps([mid, values, look_slots], sort_keys=True)
+            key = json.dumps([mid, values, look_slots, keyed], sort_keys=True)
             if key not in specs:
                 specs[key] = {"materials": [], "game": gm["name"], "shader": gm["shader"],
                               "queue": gm["queue"] if gm["queue"] > 0 else 2000, "passes": passes,
                               "values": values, "textures": look_slots,
                               "defaults": variants.get("_textureDefaults", {}).get(gm["shader"], {})}
+                if keyed:
+                    specs[key]["uniforms"] = keyed
             specs[key]["materials"].append(mname)
         # motion
         tq = np.concatenate([sol["trans"], sol["quats"]], axis=1)
@@ -657,7 +860,8 @@ def build_prop(ctx, group, rids, tracks, taken_props):
                       "mirror": bool(np.linalg.det(sol["mirror"]) < 0)})
     if not parts:
         return None
-    pmx = write_pmx(name, textures, vertices, pmx_mats, bones, morphs, comment=f"Aether Gazer prop {group} (ag-rip)")
+    pmx = write_pmx(name, textures, vertices, pmx_mats, bones, morphs, comment=f"Aether Gazer prop {group} (ag-rip)",
+                    add_uv=colors if colored else None)
     vmd = write_vmd(name, bone_keys, morph_keys)
     files[f"{name}.pmx"] = pmx
     files[f"{name}.vmd"] = vmd
@@ -665,6 +869,9 @@ def build_prop(ctx, group, rids, tracks, taken_props):
         for ext in (".vert.wgsl", ".frag.wgsl", ".json"):
             files[f"shaders/{s}{ext}"] = open(os.path.join(data, "shaders", s + ext), "rb").read()
     look = {"shaders": sorted(used_shaders), "textures": look_tex, "materials": list(specs.values())}
+    if colored:
+        # the shaders' COLOR reads the PMX's additional UV 1 (reze-engine NativeLook.streams)
+        look["streams"] = {"COLOR": 1}
     files["look.json"] = json.dumps(look, ensure_ascii=False, indent=1).encode("utf-8")
     win = windows_of(on_any)
     return {"name": name, "group": group, "files": files, "windows": win, "parts": parts,
@@ -722,7 +929,7 @@ def verify_prop(ctx, prop, tracks, pmx_bytes, vmd_bytes):
             for v, d in pmx["morphs"][f"{b['name']}_s{a}"]:
                 o[v] = d
             offs[a] = o[verts]
-        P, _, _, _ = mesh_arrays(data, meshes[rends[part["renderer"]]["mesh"]])
+        P, _, _, _ = mesh_arrays(data, meshes[rends[base_rid(part["renderer"])]["mesh"]])
         # the recorded matrix on the mesh as recorded (a mirror is baked into the PMX)
         Ph = np.c_[P, np.ones(len(P))]
         for f in np.nonzero(tr["on"])[0]:
@@ -743,39 +950,400 @@ def verify_prop(ctx, prop, tracks, pmx_bytes, vmd_bytes):
 # ---------------------------------------------------------------- scene.json
 def sun_of(stage_pkg):
     """The stage's main light as the app's sun: the engine direction is game
-    (-dx, dy, -dz), and azimuth/elevation invert azElToDirection."""
+    (-dx, dy, -dz), and azimuth/elevation invert azElToDirection.
+
+    Its COLOUR is the character's light, not the stage's: the scene sun keys the
+    cast (the native stage takes its own main light, stage.json lights.main), and
+    the game's character shader (Character/Debug) lights her with
+    _ProbeLightingBase + _ProbeLightingScale x SH.w (scale 0 on every stage
+    recorded so far) times the ramp, never with _MainLightColor: lit, albedo x
+    base. The engine's sun is Unity's light intensity (albedo x sun x N.L, no
+    pi), so the sun is base itself, as its chroma at its largest channel:
+    X324's (0.405, 0.243, 0.624) is a purple sun at 0.624, 107402's white 1 a
+    white sun at 1."""
+    base = ((stage_pkg.get("settings") or {}).get("_ProbeLightingBase") or [1, 1, 1])[:3]
+    top = max(base) if max(base) > 0 else 1.0
+    color = _hex_linear([c / top for c in base])
     dx, dy, dz = stage_pkg["lights"]["main"]["direction"]
     ex, ey, ez = -dx, dy, -dz
     ln = math.sqrt(ex * ex + ey * ey + ez * ez) or 1
     ex, ey, ez = ex / ln, ey / ln, ez / ln
     el = math.degrees(math.asin(max(-1, min(1, -ey))))
     az = math.degrees(math.atan2(-ex, -ez)) % 360
-    return {"color": "#ffffff", "strength": 1, "azimuth": round(az, 3), "elevation": round(el, 3), "shadow": True}
+    return {"color": color, "strength": round(float(top), 4), "azimuth": round(az, 3), "elevation": round(el, 3), "shadow": True}
+
+
+def cast_layer_bits(scene, frames):
+    """The rendering layers the character is drawn on (her renderers' recorded
+    renderingLayerMask, together), or None when the recording names none."""
+    mats = {m["id"]: m for m in scene["materials"]}
+    root = stage_native.cast_root(scene, mats)
+    cast = {r["id"] for r in scene["renderers"] if stage_native.is_cast(r, mats, root)}
+    bits = 0
+    for fr in frames:
+        for rid, rec in fr["r"].items():
+            if rid in cast and "layerBits" in rec:
+                bits |= int(rec["layerBits"]) & 0xFFFFFFFF
+        if bits:
+            break
+    return bits or None
+
+
+def _hex_linear(rgb):
+    """A linear RGB in [0, 1] as the document's hex colour (sRGB-encoded, as the
+    app's hexToLinearVec3 reads it back)."""
+    def enc(v):
+        v = min(1.0, max(0.0, float(v)))
+        return v * 12.92 if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055
+    return "#" + "".join(f"{round(enc(c) * 255):02x}" for c in rgb)
+
+
+def _sparse(frames, values, tol):
+    """The keys of a sampled channel that linear interpolation needs: the first,
+    the last, and every frame where the line from the last kept key to the next
+    frame misses a sample in between by more than tol. values[k] is a vector."""
+    v = np.asarray(values, np.float64).reshape(len(frames), -1)
+    keep = [0]
+    i = 0
+    while i < len(frames) - 1:
+        j = i + 1
+        while j + 1 < len(frames):
+            a, b = keep[-1], j + 1
+            t = (np.asarray(frames[a + 1:b], np.float64) - frames[a]) / max(frames[b] - frames[a], 1e-9)
+            line = v[a] + (v[b] - v[a]) * t[:, None]
+            if np.abs(line - v[a + 1:b]).max() > tol:
+                break
+            j += 1
+        keep.append(j)
+        i = j
+    return keep
+
+
+def cast_bone_points(scene, frames, blob):
+    """Per frame, her joints in game world: the translation of every bone matrix
+    her skinned renderers recorded (column-major, translation last)."""
+    mats = {m["id"]: m for m in scene["materials"]}
+    cast = [r["id"] for r in scene["renderers"] if r["kind"] == "skinned" and stage_native.is_cast(r, mats)]
+    out, last = [], np.zeros((0, 3))
+    for fr in frames:
+        pts = []
+        for rid in cast:
+            rec = fr["r"].get(rid)
+            if rec and rec.get("bones"):
+                off, cnt = rec["bones"]
+                pts.append(np.frombuffer(blob, np.float32, 16 * cnt, off).reshape(cnt, 16)[:, 12:15].astype(np.float64))
+        if pts:
+            last = np.concatenate(pts)
+        out.append(last)
+    return out
+
+
+def scene_lights(frames, blob, scene, cast_bits, tag):
+    """The lamps the game lights her with, as the scene's own (reze-design
+    SceneLight), so the user's character is lit by them as the game lights its own.
+
+    WHICH: the recorded Forward+ table (_AdditionalLights*, what the game's shaders
+    receive), every lamp whose rendering-layer mask shares a bit with her
+    renderers'. The character shader gates each lamp on unity_RenderingLayer &
+    _AdditionalLightsLayerMasks, so a lamp on the stage's layer alone (X340: 47 of
+    51, mask 2 against her 0x40000001) never reaches her: it lights the native
+    stage, which carries its own copy (stage.json). Frame 0 is the prefab's rest
+    state before the timeline has run and is left out. The table is re-sorted by
+    distance every frame, so a lamp is followed by its type, bulb and chroma, and
+    by nearest position among lamps sharing those.
+
+    UNITS. The game's character shader (Character/Debug, the PLUS_LIGHTING loop)
+    adds, per lamp, to the light it multiplies by albedo and the ramp:
+    saturate(N.L + 0.5) x C x min(1/d^2, 1/shape) x (1 - (d^2/r^2)^2)^2 (x the
+    spot term) x 1/pi - the shader's own 0.31830987: C the recorded linear
+    radiance pow(colour x intensity, 2.2), d and r in game units, shape the
+    lamp's shapeRadius (_AdditionalLightsSpotDir.w = 1/shape). The engine adds,
+    in Unity's light units, albedo x N.L x colour x intensity x (1 - (D/R)^4)^2
+    / max(D^2, near^2), D = 8d, R = 8r. The same window; identical at every
+    distance when colour x intensity = 64 C / pi (the shader's own 1/pi) and
+    near = 8 sqrt(shape) - written as the colour over its largest channel and
+    intensity = 64 / pi x that channel. What is
+    not carried: the game's half-Lambert and its ramp over the lamps (the
+    engine adds them after her graph, unramped). (A shape-0.1 stage lamp's near
+    is 2.5, written like every other; the X340 rig's 14.1 is a lamp of constant
+    strength C/14.1 inside its sphere.) Position (-x, y, -z) x 8, range x 8, a
+    spot's aim its direction (-x, y, -z), its cones the whole angles.
+
+    ANIMATED: a channel that changes during the take is written as sparse keys in
+    `track` (clip frames, the base the props' VMDs and the camera use; linear
+    between keys): position [f, x, y, z], radius [f, r], intensity [f, i],
+    color [f, "#hex"]. The plain fields hold the first frame. Returns (lamps, notes)."""
+    S = SCALE
+    if cast_bits is None:
+        return [], ["no recorded layers for her - no lamps"]
+    first = 1 if len(frames) > 1 else 0
+    tracks = []
+    for i in range(first, len(frames)):
+        fr = frames[i]
+        g = fr.get("globals") or {}
+        pos = g.get("_AdditionalLightsPosition")
+        masks = fr.get("lightLayerMaskBits") or []
+        if not pos:
+            continue
+        cols, atts = g["_AdditionalLightsColor"], g["_AdditionalLightsAttenuation"]
+        spots, types = g["_AdditionalLightsSpotDir"], g["_AdditionalLightsLightTypes"]
+        used = set()
+        for k in range(min(int(fr.get("plusLightCount", 0)), len(masks))):
+            if not (int(masks[k]) & 0xFFFFFFFF) & cast_bits:
+                continue
+            t = int(types[k])
+            C = np.array(cols[k][:3], np.float64)
+            if t not in (0, 2) or C.max() <= 0:          # spot or point, lit
+                continue
+            shape = 1 / spots[k][3] if spots[k][3] > 0 else 0.0
+            key = (t, round(shape, 3), tuple((C / C.max()).round(2)))
+            p = np.array(pos[k][:3], np.float64)
+            cand = [j for j, tr in enumerate(tracks) if tr["key"] == key and j not in used]
+            j = min(cand, key=lambda j: np.linalg.norm(tracks[j]["rows"][-1]["p"] - p), default=None)
+            if j is None:
+                tracks.append({"key": key, "rows": []})
+                j = len(tracks) - 1
+            used.add(j)
+            tracks[j]["rows"].append({"f": i, "p": p, "C": C, "r": 1 / math.sqrt(atts[k][0]), "att": atts[k],
+                                      "dir": spots[k][:3], "shape": shape, "type": t})
+    bones = cast_bone_points(scene, frames, blob)
+    lamps, notes, animated = [], [], 0
+    for tr in tracks:
+        rows = tr["rows"]
+        f0 = rows[0]
+        fs = [r["f"] for r in rows]
+        P = np.array([[-r["p"][0] * S, r["p"][1] * S, -r["p"][2] * S] for r in rows])
+        R = np.array([r["r"] * S for r in rows])
+        I = np.array([S * S * r["C"].max() / math.pi for r in rows])
+        chroma = np.array([r["C"] / r["C"].max() for r in rows])
+        shape = f0["shape"]
+        lamp = {
+            "id": f"{tag}:lamp{len(lamps) + 1}",
+            "name": f"{'spot' if f0['type'] == 0 else 'lamp'} {len(lamps) + 1}",
+            "position": [round(float(v), 4) for v in P[0]],
+            "color": _hex_linear(chroma[0]),
+            "intensity": round(float(I[0]), 4),
+            "radius": round(float(R[0]), 4),
+            "near": round(S * math.sqrt(shape), 4),
+            "stage": tag,
+        }
+        if f0["type"] == 0:
+            att, d = f0["att"], f0["dir"]
+            cos_out = -att[3] / att[2]
+            cos_in = cos_out + 1 / att[2]
+            lamp["aim"] = [round(-d[0], 6), round(d[1], 6), round(-d[2], 6)]
+            lamp["angle"] = round(2 * math.degrees(math.acos(max(-1.0, min(1.0, cos_out)))), 3)
+            lamp["innerAngle"] = round(2 * math.degrees(math.acos(max(-1.0, min(1.0, cos_in)))), 3)
+        # sparse keys for whatever the take moves
+        track = {}
+        if len(rows) > 1:
+            if np.ptp(P, axis=0).max() > 1e-3:
+                track["position"] = [[fs[k], *[round(float(v), 4) for v in P[k]]] for k in _sparse(fs, P, 0.01)]
+            if np.ptp(R) > 1e-3:
+                track["radius"] = [[fs[k], round(float(R[k]), 4)] for k in _sparse(fs, R, 0.01)]
+            if np.ptp(I) > 1e-4 * I.max():
+                track["intensity"] = [[fs[k], round(float(I[k]), 4)] for k in _sparse(fs, I, 0.005 * I.max())]
+            if np.ptp(chroma, axis=0).max() > 2e-3:
+                track["color"] = [[fs[k], _hex_linear(chroma[k])] for k in _sparse(fs, chroma, 2e-3)]
+        if track:
+            lamp["track"] = track
+            animated += 1
+        lamps.append(lamp)
+        # how much of her it reaches, for the record
+        reach = [np.linalg.norm(bones[r["f"]] - r["p"], axis=1).min() < r["r"] for r in rows if len(bones[r["f"]])]
+        notes.append(f"{lamp['name']}: C {[round(float(c), 3) for c in f0['C']]} range {f0['r']:.3f} m bulb {shape:g}"
+                     f" -> intensity {lamp['intensity']:g}, near {lamp['near']:g}"
+                     + (f"; keyed {', '.join(f'{k} {len(v)}' for k, v in track.items())}" if track else "")
+                     + (f"; reaches her on {100 * np.mean(reach):.0f}% of {len(rows)} frames" if reach else ""))
+    head = f"{len(lamps)} recorded lamps reach her layers" + (f", {animated} animated" if animated else "")
+    return lamps, [head] + notes
+
+
+def lut_cube(data, scene, tex_id):
+    """The Final pass's grading LUT (_ColorGraddingLut, AGSimPostFX's bake of the
+    volume stack, URP's LDR strip: size^2 x size, slice b along x, red within it,
+    green up, 8-bit sRGB) as the app's stage-grade cube: size^3 RGB texels, red
+    fastest, then green, then blue, base64. The recording writes it upright
+    (PNG row 0 = the top texel row, green highest). The Final looks it up with the
+    tonemapped (and vignetted) colour, linear in [0, 1], texel centres at
+    c * (size - 1) - the app's stage grade: after the view, display-linear."""
+    import base64
+    from PIL import Image
+    t = next((t for t in scene["textures"] if t["id"] == tex_id), None)
+    if not t or not t["files"] or not t["files"][0].endswith(".png"):
+        return None, f"grading LUT {tex_id}: no 8-bit picture in the recording"
+    im = np.asarray(Image.open(os.path.join(data, "textures", t["files"][0])).convert("RGB"))
+    n = im.shape[0]
+    if im.shape[1] != n * n:
+        return None, f"grading LUT {tex_id}: {im.shape[1]}x{n} is not a size^2 x size strip"
+    strip = im[::-1]                          # row k = green index k; x = b * size + r
+    cube = strip.reshape(n, n, n, 3)          # [g, b, r]
+    cube = np.ascontiguousarray(cube.transpose(1, 0, 2, 3))  # [b, g, r]: red fastest
+    return {"size": n, "lut": base64.b64encode(cube.tobytes()).decode("ascii")}, None
+
+
+def scene_post(data, scene, frames, tag):
+    """The take's post chain as the game ran it (the recorded Final / Bloom
+    materials, AGSimPostFX): the app's bloom, view exposure and stage grade, or
+    None when the recording carries none. Returns (settings, notes)."""
+    posts = [f["post"] for f in frames if f.get("post")]
+    if not posts:
+        return None, ["no post chain in the recording - the stage's own view and bloom"]
+    notes = []
+    post = next((p for p in posts if p.get("lut")), posts[0])
+    fin = post.get("final") or {}
+    p = (post.get("bloom") or {}).get("_Params") or [0.77, 100, 0.7, 0.35]
+    out = {"bloom": {"enabled": bool(post.get("bloomEnabled", 1)), "threshold": round(float(p[2]), 4),
+                     "scatter": round((float(p[0]) - 0.05) / 0.9, 4), "intensity": 1, "color": "#ffffff"}}
+    notes.append(f"bloom: threshold {p[2]:g}, scatter {p[0]:g}, knee {p[3]:g} (not carried: the app's is fixed), "
+                 f"clamp {p[1]:g}; the Final adds it at full, untinted")
+    extra = {k: v for k, v in (post.get("bloom") or {}).items() if k != "_Params"}
+    if extra:
+        notes.append(f"bloom material also holds {extra} - not carried")
+    tm = float(fin.get("tonemapping", 1))
+    exposure, contrast = float(fin.get("exposure", 2.5)), float(fin.get("contrast", 1.4))
+    ev = math.log2(exposure / 2.5) if exposure > 0 else 0.0
+    out["view"] = {"transform": "soft", "exposure": round(ev, 4) if abs(ev) > 1e-4 else 0}
+    notes.append(f"Final exposure {exposure:g} -> view {out['view']['exposure']:+g} EV; contrast {contrast:g}"
+                 + ("" if abs(contrast - 1.4) < 1e-3 else " (the app's soft curve is 1.4 - not expressible)"))
+    if tm < 1:
+        notes.append(f"tonemapping {tm:g}: the curve and the grade are mixed in at that weight - carried at full")
+    if fin.get("_ACES_TONEMAP"):
+        notes.append("the Final uses its ACES curve - carried as the soft curve")
+    # the grade
+    if post.get("lut") and tm > 0:
+        grade, why = lut_cube(data, scene, post["lut"])
+        if grade:
+            out["stageGrade"] = {**grade, "stage": tag}
+            notes.append(f"grading LUT {post['lut']}: {grade['size']}^3 cube -> settings.stageGrade")
+        else:
+            out["stageGrade"] = None
+            notes.append(why)
+    else:
+        # none here: a previous take's or stage's grade goes
+        out["stageGrade"] = None
+        notes.append("no grading LUT")
+    # what else the Final does, over the take, reported only
+    for key, label in (("_VignetteEnable", "vignette"), ("_Grayness", "grayness"), ("_Darkness", "darkness (fade to black)"),
+                       ("_invert", "invert"), ("_HasGobalDistortionTexture", "screen distortion")):
+        vals = sorted({round(float((q.get("final") or {}).get(key, 0)), 3) for q in posts})
+        if any(vals):
+            notes.append(f"{label}: {vals[0]:g}..{vals[-1]:g} over the take - not carried")
+    kws = sorted({k for q in posts for k in (q.get("finalKeywords") or [])})
+    if kws:
+        notes.append(f"Final keywords {kws} - not carried")
+    for key in ("exposure", "contrast", "tonemapping"):
+        vals = {round(float((q.get("final") or {}).get(key, 0)), 4) for q in posts}
+        if len(vals) > 1:
+            notes.append(f"Final {key} varies over the take {sorted(vals)} - one value kept")
+    if len({json.dumps((q.get("bloom") or {}).get("_Params")) for q in posts}) > 1:
+        notes.append("bloom varies over the take - one value kept")
+    return out, notes
 
 
 def mesh_particle_prop(ctx, r, baked, taken):
-    """A mesh particle holding one still particle, as a prop: its mesh at the pose
-    the recording baked it in (an affine fit of the mesh onto the baked vertices,
-    which for X306a's qiu is the system's matrix times its start size)."""
+    """A mesh particle system as a prop: one part per particle slot, its mesh at
+    the pose the recording baked that particle in (an affine fit of the mesh onto
+    the baked vertices, which for X306a's qiu is the system's matrix times its
+    start size), every frame, on while the particle is alive. The baked vertex
+    colour (start colour x colour over life - a fade) and baked UVs (a flipbook)
+    are not carried: the prop draws the mesh's own UVs under its material.
+    The baked vertex colour is the mesh's own times the particle's colour (start
+    colour x colour over life): that factor, per slot and frame, is the track's
+    "color" (linear as baked: the game's linear-space renderer has already made
+    the particle's colour linear), which build_prop keys onto the mesh's own colours.
+    Returns (prop, max |fit error|, {part id: track}, note)."""
     meshes = {m["id"]: m for m in ctx["scene"]["meshes"]}
-    P, _, _, _ = mesh_arrays(ctx["data"], meshes[r["mesh"]])
-    B = baked[0].astype(np.float64)
-    if len(P) != len(B):
-        print(f"  note: {r['path']}: the baked particle has {len(B)} vertices, its mesh {len(P)} - left out")
-        return None, None, None
-    A = np.c_[P, np.ones(len(P))]
-    X, *_ = np.linalg.lstsq(A, B, rcond=None)
-    err = float(np.abs(A @ X - B).max())
-    M = np.eye(4)
-    M[:3, :] = X.T
+    P, _, UV, _ = mesh_arrays(ctx["data"], meshes[r["mesh"]])
+    mc = mesh_colors(ctx["data"], meshes[r["mesh"]])
+    ref = mc if mc is not None else np.ones((len(P), 4))
+    nv = len(P)
+    A = np.c_[P, np.ones(nv)]
+    pinv = np.linalg.pinv(A)
+    # a flat mesh (a disc, a card) leaves the fit's normal axis free: the least-
+    # squares answer there is noise - a mirror on some frames, a wild scale. Its
+    # in-plane map is fitted alone and completed by the normal that keeps the
+    # handedness (an in-plane flip is then a half turn, which T R S can carry)
+    mean = P.mean(axis=0)
+    _, sv, Vt = np.linalg.svd(P - mean, full_matrices=False)
+    flat = len(sv) == 3 and sv[2] < 1e-4 * sv[0] and sv[1] > 1e-4 * sv[0]
+    if flat:
+        E = np.stack([Vt[0], Vt[1], np.cross(Vt[0], Vt[1])])   # u1, u2, n (rows)
+        uv_pinv = np.linalg.pinv((P - mean) @ E[:2].T)          # [2, nv]
+
+    def fit(B):
+        if not flat:
+            X = pinv @ B
+            M = np.eye(4)
+            M[:3, :] = X.T
+            return M
+        Bm = B.mean(axis=0)
+        Q = uv_pinv @ (B - Bm)                                  # rows: L u1, L u2
+        c = np.cross(Q[0], Q[1])
+        cn = np.linalg.norm(c)
+        Ln = c / cn * math.sqrt(np.linalg.norm(Q[0]) * np.linalg.norm(Q[1])) if cn > 1e-12 else np.zeros(3)
+        L = np.stack([Q[0], Q[1], Ln], axis=1) @ E
+        M = np.eye(4)
+        M[:3, :3] = L
+        M[:3, 3] = Bm - L @ mean
+        return M
     n = ctx["frames"]
-    track = {"on": np.ones(n, bool), "M": np.tile(M, (n, 1, 1)),
-             "states": [{"on": 1, "mats": r["materials"], "mpb": {}} for _ in range(n)]}
-    prop = build_prop(ctx, r["path"].split("/")[-1], [r["id"]], {r["id"]: track}, taken)
-    return prop, err, track
+    slots, err, odd, fade, flip = {}, 0.0, 0, [], False
+    for f, m in enumerate(baked):
+        if m is None or not len(m[3]):
+            continue
+        p, uv, c, _idx = m
+        if len(p) % nv:
+            odd += 1
+            continue
+        for j in range(len(p) // nv):
+            B = p[j * nv:(j + 1) * nv].astype(np.float64)
+            M = fit(B)
+            err = max(err, float(np.abs(A @ M[:3, :].T - B).max()))
+            if j not in slots:
+                slots[j] = {"on": np.zeros(n, bool), "M": np.tile(np.eye(4), (n, 1, 1)),
+                            "color": np.ones((n, 4))}
+            slots[j]["on"][f] = True
+            slots[j]["M"][f] = M
+            # the particle's colour: the baked colour over the mesh's own, read
+            # where the mesh's own is not ~0 (a rim at alpha 0 says nothing)
+            cj = c[j * nv:(j + 1) * nv].astype(np.float64) / 255.0
+            for a in range(4):
+                good = ref[:, a] > 0.05
+                if good.any():
+                    slots[j]["color"][f, a] = float(np.clip(np.median(cj[good, a] / ref[good, a]), 0.0, 1.0))
+            fade.append(float(c[j * nv:(j + 1) * nv, 3].mean()))
+            if UV is not None and not flip and np.abs(uv[j * nv:(j + 1) * nv, :2] - UV[:, :2]).max() > 1e-3:
+                flip = True
+    if not slots:
+        print(f"  note: {r['path']}: the baked particles never have its mesh's {nv} vertices - left out")
+        return None, None, None, None
+    tracks = {}
+    for j, t in slots.items():
+        # off frames hold the nearest frame's colour (the part is collapsed there;
+        # a hold keeps the keys from ramping across the gap)
+        on_f = np.nonzero(t["on"])[0]
+        near = on_f[np.clip(np.searchsorted(on_f, np.arange(n)), 0, len(on_f) - 1)]
+        # as baked: BakeMesh hands the colour the shader is given, already made
+        # linear by the game's linear-space renderer (a particle whose start colour
+        # is random between two colours bakes onto the line between the two made
+        # linear) - converting it again darkened 102201's moon ripples to nothing
+        t["color"] = t["color"][near]
+        pid = f"{r['id']}#{j}"
+        t["states"] = [{"on": int(t["on"][f]), "mats": r["materials"], "mpb": {}} for f in range(n)]
+        tracks[pid] = t
+    prop = build_prop(ctx, r["path"].split("/")[-1], list(tracks), tracks, taken)
+    notes = []
+    if odd:
+        notes.append(f"{odd} frames whose vertex count is not a multiple of the mesh's skipped")
+    if fade and (max(fade) - min(fade)) > 0.02:
+        notes.append(f"its vertex alpha (colour over life) runs {min(fade) / 255:.3f}..{max(fade) / 255:.3f} - keyed")
+    if flip:
+        notes.append("its baked UVs differ from the mesh's (a UV module) - the mesh's are drawn")
+    return prop, err, tracks, "; ".join(notes)
 
 
-def scene_doc(tag, props, stage_pkg, stage_dir, extra_models=(), effects=(), sequence=True):
+def scene_doc(tag, props, stage_pkg, stage_dir, extra_models=(), effects=(), sequence=True, post=None, lights=None):
     """A scene PATCH (reze-design lib/scene-patch.ts): JSON Merge Patch over the
     scene it is imported into, so the user's character, her motion and every
     setting this does not name stay. Only what the sequence owns is written: the
@@ -808,6 +1376,24 @@ def scene_doc(tag, props, stage_pkg, stage_dir, extra_models=(), effects=(), seq
     models += [dict(m) for m in extra_models]
     for m in models:
         m["origin"] = tag
+    settings = {
+        "sun": sun_of(stage_pkg),
+        # the game's bloom at the stage's own threshold: scatter 0.77, white,
+        # intensity 1 are the game's constants
+        "bloom": {"enabled": True, "threshold": round(bloom.get("threshold", 0.7), 4),
+                  "scatter": 0.8, "intensity": 1, "color": "#ffffff"},
+        # "soft" is the game's own curve
+        "view": {"transform": "soft", "exposure": 0},
+        # the stage brings its own floor; ours goes off (its look stays the user's)
+        "ground": {"enabled": False},
+        "background": {"effects": [{**e, "stage": tag} for e in effects]},
+    }
+    # the take's own post chain, as recorded (scene_post): bloom, exposure, grade
+    if post:
+        settings.update(post)
+    # the recorded lamps that reach the character (scene_lights), tagged with the DLC
+    if lights is not None:
+        settings["lights"] = lights
     return {
         "version": 1,
         "patch": True,
@@ -820,18 +1406,7 @@ def scene_doc(tag, props, stage_pkg, stage_dir, extra_models=(), effects=(), seq
             # the game stage package, bundle-relative folder
             "nativeStage": stage_dir,
         },
-        "settings": {
-            "sun": sun_of(stage_pkg),
-            # the game's bloom at the stage's own threshold: scatter 0.77, white,
-            # intensity 1 are the game's constants
-            "bloom": {"enabled": True, "threshold": round(bloom.get("threshold", 0.7), 4),
-                      "scatter": 0.77, "intensity": 1, "color": "#ffffff"},
-            # "soft" is the game's own curve
-            "view": {"transform": "soft", "exposure": 0},
-            # the stage brings its own floor; ours goes off (its look stays the user's)
-            "ground": {"enabled": False},
-            "background": {"effects": [{**e, "stage": tag} for e in effects]},
-        },
+        "settings": settings,
     }
 
 
@@ -853,6 +1428,8 @@ def main():
     ap.add_argument("--scene-dir", help="per-sequence character.vmd/camera.vmd/audio.wav (default AG_dlc_scene/<skin>)")
     ap.add_argument("--stage", help="an already written stage folder to use as is (default: rewrite it)")
     ap.add_argument("--verify", action="store_true", help="read the props back and check them against the recording")
+    ap.add_argument("--out", help="folder for the zips (default <dlc>/reze)")
+    ap.add_argument("--no-lights", action="store_true", help="leave out the lamps that reach her (settings.lights)")
     a = ap.parse_args()
     dlc = os.path.normpath(a.dlc)
     dlc_name = os.path.basename(dlc)
@@ -867,7 +1444,7 @@ def main():
     stage_dir = a.stage or stage_native.export_stage(dlc)
     stage_pkg, stage_rel = stage_files(stage_dir)
 
-    out_dir = os.path.join(dlc, "reze")
+    out_dir = a.out or os.path.join(dlc, "reze")
     os.makedirs(out_dir, exist_ok=True)
     pctx = {"data": data, "scene": scene, "dlc": dlc,
             "scratch": os.path.join(tempfile.gettempdir(), "ag-rip-dlc-particles")}
@@ -883,7 +1460,8 @@ def main():
         tracks = dense_tracks(frames, blob, scene, rids)
         # a stage renderer that moves or switches here stays at its first state
         kinds = {r["id"]: r for r in scene["renderers"]}
-        moved = sorted({rid for fr in frames[1:] for rid, rec in fr["r"].items()
+        first = sum(1 for fr in frames if fr.get("lead"))     # the recording's own first line (full state)
+        moved = sorted({rid for fr in frames[first + 1:] for rid, rec in fr["r"].items()
                         if kinds[rid]["kind"] == "mesh" and not kinds[rid]["path"].startswith("Char/")
                         and ("m" in rec or "on" in rec)}, key=lambda s: int(s[1:]))
         for rid in moved:
@@ -891,7 +1469,11 @@ def main():
         ctx = {"data": data, "scene": scene, "variants": variants, "frames": len(frames), "skipped_tex": set()}
         props, taken = [], set()
         for group, g_rids in groups.items():
-            p = build_prop(ctx, group, g_rids, tracks, taken)
+            try:
+                p = build_prop(ctx, group, g_rids, tracks, taken)
+            except Untranslated as e:
+                print(f"  note: prop {group} left out - {e}")
+                continue
             if p:
                 props.append(p)
         ptracks = dense_tracks(frames, blob, scene, [r["id"] for r in particles])
@@ -901,12 +1483,30 @@ def main():
         stage_particles = [r for r in stage_particles if sp_tracks[r["id"]]["on"].any()]
         fx = dlc_particles.build(pctx, frames, blob, live_particles + stage_particles, {**ptracks, **sp_tracks})
         for r, baked in fx["mesh_props"]:
-            p, err, track = mesh_particle_prop(ctx, r, baked, taken)
+            try:
+                p, err, ptr, note = mesh_particle_prop(ctx, r, baked, taken)
+            except Untranslated as e:
+                print(f"  note: mesh particle {r['path']} left out - {e}")
+                continue
             if p:
-                tracks[r["id"]] = track
-                print(f"  mesh particle {r['path']} -> prop {p['name']} (pose fit to the baked particle, max |error| {err:.1e} game units)")
+                tracks.update(ptr)
+                print(f"  mesh particle {r['path']} -> prop {p['name']}: {len(p['parts'])} particle slot(s), "
+                      f"pose fit to the baked particles, max |error| {err:.1e} game units" + (f"; {note}" if note else ""))
                 props.append(p)
-        extra = [fx["model"]] if fx["model"] else []
+        extra = []
+        if fx["model"]:
+            model = dict(fx["model"])
+            if fx["motion"]:
+                # moving emitters: their point bones keyed with the recorded motion
+                keys = []
+                for bone, arr in fx["motion"].items():
+                    for f in keep_frames(arr):
+                        keys.append((bone, f, tuple(arr[f, :3]), tuple(arr[f, 3:])))
+                fx["files"][f"{dlc_particles.EMITTERS}.vmd"] = write_vmd(dlc_particles.EMITTERS, keys, [])
+                model["animation"] = f"props/{dlc_particles.EMITTERS}/{dlc_particles.EMITTERS}.vmd"
+                print(f"  emitters: {len(fx['motion'])} point bones follow their system's recorded motion "
+                      f"({len(keys)} keys, particle_emitters.vmd)")
+            extra = [model]
 
         # her motion, the camera and the voice: all three or none
         seq_files = [(os.path.join(scene_dir, seq, f), f) for f in SEQUENCE_FILES]
@@ -915,19 +1515,30 @@ def main():
             print(f"  warning: {', '.join(missing)} missing - no motion, camera or audio in this zip")
             seq_files = []
         name = f"{dlc_name}-{seq}"
-        doc = scene_doc(dlc_name, props, stage_pkg, "stage/", extra, fx["effects"], sequence=bool(seq_files))
+        # the take's lamps (those reaching her), bloom, exposure and grade, as recorded
+        lights, lnotes = (([], ["no scene lamps (--no-lights)"]) if a.no_lights
+                          else scene_lights(frames, blob, scene, cast_layer_bits(scene, frames), dlc_name))
+        post, pnotes = scene_post(data, scene, frames, dlc_name)
+        for line in lnotes + pnotes:
+            print(f"  look: {line}")
+        doc = scene_doc(dlc_name, props, stage_pkg, "stage/", extra, fx["effects"], sequence=bool(seq_files),
+                        post=post, lights=lights)
         zpath = os.path.join(out_dir, f"{name}.zip")
+        # pictures stored: deflate saves 0.0% on webp and 1.3% on png across every
+        # zip (wav 37%, bin 58%, the text 80%+), and a stored entry is a zero-copy
+        # slice for reze's lazy reader instead of an inflate
+        method = lambda path: zipfile.ZIP_STORED if path.lower().endswith((".webp", ".png")) else zipfile.ZIP_DEFLATED
         with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("scene.json", json.dumps(doc, ensure_ascii=False, indent=2))
             for rel in stage_rel:
-                z.write(os.path.join(stage_dir, rel), f"stage/{rel}")
+                z.write(os.path.join(stage_dir, rel), f"stage/{rel}", method(rel))
             for p in props:
                 for rel, b in p["files"].items():
-                    z.writestr(f"props/{p['name']}/{rel}", b)
+                    z.writestr(f"props/{p['name']}/{rel}", b, method(rel))
             for rel, b in fx["files"].items():
-                z.writestr(f"props/{dlc_particles.EMITTERS}/{rel}", b)
+                z.writestr(f"props/{dlc_particles.EMITTERS}/{rel}", b, method(rel))
             for src, dst in seq_files:
-                z.write(src, dst)
+                z.write(src, dst, method(dst))
         print(f"  {zpath}: {os.path.getsize(zpath) / 1e6:.1f} MB")
         for p in props:
             print(f"  prop {p['name']}: {len(p['parts'])} parts, {p['vertices']} vertices, {p['materials']} materials, "

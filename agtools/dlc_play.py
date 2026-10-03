@@ -94,7 +94,10 @@ PORTS = ((DLC_HELPERS, "P08.Timeline"), (DLC_HELPERS, "P08.Main"),
 # FreeLook, Composer, ...) under their old serialized names.
 PACKAGES = {"com.unity.cinemachine": "6.6.0", "com.unity.timeline": "6.6.0", "com.unity.ugui": "2.0.0"}
 # AssetRipper writes stubs for the package assemblies; the real packages replace them
-PACKAGE_STUBS = {"Cinemachine": "com.unity.cinemachine", "Unity.Timeline": "com.unity.timeline"}
+# (UnityEngine.UI: a skin whose bundles carry a UGUI component, 128402, gets a stub
+# assembly of that name, which collides with com.unity.ugui's and stops compilation)
+PACKAGE_STUBS = {"Cinemachine": "com.unity.cinemachine", "Unity.Timeline": "com.unity.timeline",
+                 "UnityEngine.UI": "com.unity.ugui"}
 ASSET_EXT = (".asset", ".prefab", ".playable", ".unity", ".controller", ".signal")
 AUDIO = os.path.join(ROOT, "AG_dlc_scene")
 
@@ -300,6 +303,152 @@ def exposed_references(proj: str) -> int:
     return changed
 
 
+# a build keeps a material curve's property only as a hash: AssetRipper writes the
+# binding as `attribute: material.path_0x<H>_<junk>`, H = kind << 28 | (CRC-32 of the
+# property name) & 0x0FFFFFFF, kind 0-3 a vector's x..w, 4-7 a colour's r..a, 8 a float
+MATERIAL_CURVE = re.compile(r"(attribute: material\.)path_0x([0-9A-Fa-f]{1,8})_\w+")
+VECTOR_SUFFIX, COLOUR_SUFFIX = (".x", ".y", ".z", ".w"), (".r", ".g", ".b", ".a")
+
+
+def material_curves(proj: str) -> tuple[int, list[str]]:
+    """Give the timelines' material curves (fade a liquid, dissolve it: 102202's pour,
+    `_Color` and `_DissovleStrength`) their property names back, so Unity plays them.
+    Every shader property name of the project is hashed and matched; a curve whose
+    hash matches none is left as it is and reported. Returns (curves named, unknown)."""
+    assets = os.path.join(proj, "Assets")
+    names = {}
+    for dp, _, fns in os.walk(assets):
+        for fn in fns:
+            if not fn.endswith(".shader"):
+                continue
+            text = open(os.path.join(dp, fn), encoding="utf-8", errors="replace").read()
+            for name, kind in re.findall(r"^\s*(?:\[[^\]]*\]\s*)*(_\w+)\s*\(\s*\"[^\"]*\"\s*,\s*(\w+)", text, re.M):
+                names.setdefault(zlib.crc32(name.encode()) & 0x0FFFFFFF, (name, kind.lower()))
+    named, unknown = 0, set()
+
+    def sub(m: re.Match) -> str:
+        nonlocal named
+        h = int(m.group(2), 16)
+        got = names.get(h & 0x0FFFFFFF)
+        kind = h >> 28
+        if not got or kind > 8:
+            unknown.add(m.group(2))
+            return m.group(0)
+        name, ptype = got
+        named += 1
+        if kind == 8:
+            return f"{m.group(1)}{name}"
+        return f"{m.group(1)}{name}{(COLOUR_SUFFIX if ptype == 'color' else VECTOR_SUFFIX)[kind & 3]}"
+
+    for dp, _, fns in os.walk(assets):
+        for fn in fns:
+            if not fn.endswith(".anim"):
+                continue
+            path = os.path.join(dp, fn)
+            text = open(path, encoding="utf-8", errors="surrogateescape").read()
+            if "material.path_0x" not in text:
+                continue
+            new = MATERIAL_CURVE.sub(sub, text)
+            if new != text:
+                open(path, "w", encoding="utf-8", errors="surrogateescape", newline="").write(new)
+    return named, sorted(unknown)
+
+
+SCRIPT_CURVE = re.compile(r"(attribute: )(\S+)(\n\s+path:([^\n]*)\n\s+classID: 114\n"
+                          r"\s+script: \{fileID: 11500000, guid: )(\w+)")
+_YAML_KEY = re.compile(r"^( *)([A-Za-z_]\w*):(.*)$")
+
+
+def _field_paths(doc: str) -> list[str]:
+    """The dotted serialized field paths of one MonoBehaviour document (nested mappings by
+    indentation, inline {x: .., y: ..} mappings by key; sequences are not descended)."""
+    out, stack = [], []
+    for line in doc.split("\n")[2:]:
+        m = _YAML_KEY.match(line)
+        if not m:
+            continue
+        ind, key, rest = len(m.group(1)), m.group(2), m.group(3).strip()
+        while stack and stack[-1][0] >= ind:
+            stack.pop()
+        path = ".".join([k for _, k in stack] + [key])
+        if not rest:
+            stack.append((ind, key))
+            continue
+        out.append(path)
+        if rest.startswith("{") and "fileID" not in rest:
+            out += [f"{path}.{k}" for k in re.findall(r"(\w+):", rest)]
+    return out
+
+
+def script_curves(proj: str) -> tuple[int, list[str]]:
+    """Give the timelines' script curves their field names back, so Unity plays them:
+    AssetRipper writes a MonoBehaviour float curve as `script_0x<CRC-32 of the field path>_..`
+    (a vcam's m_Lens.FieldOfView and m_Lens.Dutch, a CharacterPointLightController's
+    diffuseIntensity, a ReplicaAdditionalLightData's m_ShapeRadius...), which binds to nothing.
+    The paths come from the serialized components of the project's prefabs and scenes; a
+    curve whose script guid no component uses (a package stub swap_package_stubs removed)
+    takes the guid of the components that carry the field. Returns (curves named, unknown)."""
+    assets = os.path.join(proj, "Assets")
+    anims = []
+    for dp, _, fns in os.walk(assets):
+        for fn in fns:
+            if fn.endswith(".anim"):
+                path = os.path.join(dp, fn)
+                text = open(path, encoding="utf-8", errors="surrogateescape").read()
+                if "classID: 114" in text:
+                    anims.append((path, text))
+    if not anims:
+        return 0, []
+    fields: dict[int, set[tuple[str, str]]] = {}
+    used = set()
+    for dp, _, fns in os.walk(assets):
+        for fn in fns:
+            if not fn.endswith((".prefab", ".unity")):
+                continue
+            text = open(os.path.join(dp, fn), encoding="utf-8", errors="surrogateescape").read()
+            go_names = dict(re.findall(r"\n--- !u!1 &(-?\d+)\nGameObject:.*?\n  m_Name: ([^\n]*)", text, re.S))
+            for doc in text.split("\n--- !u!114 ")[1:]:
+                g = re.search(r"\n  m_Script: \{fileID: 11500000, guid: (\w+)", doc)
+                if not g:
+                    continue
+                used.add(g.group(1))
+                go = re.search(r"\n  m_GameObject: \{fileID: (-?\d+)\}", doc)
+                go = go_names.get(go.group(1), "") if go else ""
+                for p in _field_paths(doc):
+                    fields.setdefault(zlib.crc32(p.encode()), set()).add((p, g.group(1), go))
+    named, unknown = 0, set()
+
+    def sub(m: re.Match) -> str:
+        nonlocal named
+        attr, guid = m.group(2), m.group(5)
+        h = re.match(r"script_0x([0-9A-Fa-f]{1,8})_\w+$", attr)
+        if not h and guid in used:
+            return m.group(0)
+        cands = fields.get(int(h.group(1), 16) if h else zlib.crc32(attr.encode()), set())
+        names = {p for p, _, _ in cands}
+        if len(names) != 1:
+            if h:
+                unknown.add(h.group(1))
+            return m.group(0)
+        if guid not in used:
+            # the components that carry the field; when several classes do (a vcam's
+            # m_Lens), the one on the object the curve animates (its path's last name)
+            owners = {g for _, g, _ in cands}
+            if len(owners) > 1:
+                leaf = m.group(4).strip().split("/")[-1]
+                owners = {g for _, g, go in cands if go == leaf} or owners
+            if len(owners) == 1:
+                guid = owners.pop()
+        named += h is not None or guid != m.group(5)
+        return f"{m.group(1)}{names.pop()}{m.group(3)}{guid}"
+
+    for path, text in anims:
+        new = SCRIPT_CURVE.sub(sub, text)
+        if new != text:
+            open(path, "w", encoding="utf-8", errors="surrogateescape", newline="").write(new)
+    return named, sorted(unknown)
+
+
 def readable_meshes(proj: str) -> int:
     """Mesh assets as readable (m_IsReadable: 1): AGDlcRecord reads their vertex streams in
     Play mode, which Unity refuses for a mesh saved non-readable."""
@@ -321,16 +470,23 @@ def readable_meshes(proj: str) -> int:
     return n
 
 
+# the packages PACKAGES names are built into the editor: their sources (and script guids)
+# are here before a project has ever opened
+BUILTIN_PACKAGES = os.path.join(os.path.dirname(stage_unity.UNITY), "Data", "Resources", "PackageManager", "BuiltInPackages")
+
+
 def rewrite_script_refs(proj: str, stub_guids: dict[str, str]) -> int:
-    """Every asset reference to a stub script -> the package's script of that class."""
-    cache = os.path.join(proj, "Library", "PackageCache")
+    """Every asset reference to a stub script -> the package's script of that class. The
+    package scripts' guids come from the editor's built-in packages (the very files Unity
+    copies into Library/PackageCache), so this runs before the first import."""
     real = {}
-    for dp, _, fns in os.walk(cache):
-        if not any(p in dp for p in PACKAGE_STUBS.values()):
-            continue
-        for fn in fns:
-            if fn.endswith(".cs.meta"):
-                real.setdefault(fn[:-8], _guid(os.path.join(dp, fn)))
+    for root in [os.path.join(BUILTIN_PACKAGES, p) for p in PACKAGE_STUBS.values()] + [os.path.join(proj, "Library", "PackageCache")]:
+        for dp, _, fns in os.walk(root):
+            if not any(p in dp for p in PACKAGE_STUBS.values()):
+                continue
+            for fn in fns:
+                if fn.endswith(".cs.meta"):
+                    real.setdefault(fn[:-8], _guid(os.path.join(dp, fn)))
     remap = {g: real[c] for g, c in stub_guids.items() if c in real}
     missing = sorted(c for c in stub_guids.values() if c not in real)
     if missing:
@@ -369,7 +525,9 @@ def dlc_spec(proj: str, info: dict) -> dict:
     os.makedirs(audio_dst, exist_ok=True)
     seqs = []
     for name in info["play"]:
-        prefab = os.path.join(seq_dir, f"{name}.prefab") if seq_dir else ""
+        # touch1.prefab, or the skin-prefixed 109503ui_wedding_touch_101.prefab
+        prefab = next((p for p in (os.path.join(seq_dir, f"{name}.prefab"), os.path.join(seq_dir, f"{info['skin']}ui_{name}.prefab"))
+                       if os.path.isfile(p)), "") if seq_dir else ""
         wav = os.path.join(AUDIO, info["skin"], name, "audio.wav")
         audio = ""
         if os.path.isfile(wav):
@@ -390,7 +548,11 @@ def unity(proj: str, log: str, method: str | None = None) -> int:
     return subprocess.run(cmd, check=False).returncode
 
 
-def make_playable(project: str, info: dict) -> str:
+def prepare_playable(project: str, info: dict) -> str:
+    """Every file change of the play setup, made before Unity opens the project (after the
+    stage fix-ups: the game's shaders are in), so its one launch imports each asset once,
+    as it stays. The package stubs' references go straight to the editor's built-in
+    package scripts."""
     proj = os.path.join(project, "ExportedProject")
     stage_unity.copy_helpers(project)          # the pipeline stand-in, current
     stub_guids = swap_package_stubs(proj)
@@ -400,14 +562,31 @@ def make_playable(project: str, info: dict) -> str:
     shader_uniforms(proj)
     readable_meshes(proj)
     exposed_references(proj)
-    unity(proj, os.path.join(project, "_unity_packages.log"))          # resolve packages, compile
+    named, unknown = material_curves(proj)
+    if named or unknown:
+        print(f"   material curves: {named} named" + (f", unknown hashes {unknown}" if unknown else ""))
+    named, unknown = script_curves(proj)
+    if named or unknown:
+        print(f"   script curves: {named} named" + (f", unknown hashes {unknown}" if unknown else ""))
     changed = rewrite_script_refs(proj, stub_guids)
-    rc = unity(proj, os.path.join(project, "_unity_dlc.log"), "AGDlcScene.Batch")
-    errors = sorted({l.strip() for l in open(os.path.join(project, "_unity_dlc.log"), encoding="utf-8", errors="replace")
-                     if "error CS" in l})
     return (f"{len(ports)} game classes ported, {len(stub_guids)} package stubs swapped, {changed} assets "
-            f"repointed, scene for {[s['name'] for s in spec['sequences']]} (unity {rc})"
-            + (f"; COMPILE ERRORS: {errors[:5]}" if errors else ""))
+            f"repointed, scene for {[s['name'] for s in spec['sequences']]}")
+
+
+def compile_errors(log: str) -> str:
+    if not os.path.isfile(log):
+        return f"; NO LOG {log}"
+    errors = sorted({l.strip() for l in open(log, encoding="utf-8", errors="replace") if "error CS" in l})
+    return f"; COMPILE ERRORS: {errors[:5]}" if errors else ""
+
+
+def make_playable(project: str, info: dict) -> str:
+    """The play setup on an existing export (--playable-only): files, then the DLC scene."""
+    note = prepare_playable(project, info)
+    proj = os.path.join(project, "ExportedProject")
+    log = os.path.join(project, "_unity_dlc.log")
+    rc = unity(proj, log, "AGDlcScene.Batch")
+    return f"{note} (unity {rc})" + compile_errors(log)
 
 
 def _clear(path: str) -> None:
@@ -462,10 +641,15 @@ def main() -> int:
             ar.export(staged, project, ShaderExportMode="Dummy")
         shutil.rmtree(staged, ignore_errors=True)
         scripts = stage_unity.install_helpers(project, [os.path.join(bundle_deps.ROOT, b) for b in bundles])
-        note = stage_unity.finish(project, info["stage"].lower(), bundles, missing, f"{scripts} game script(s) rebuilt; ")
+        # the play setup's file changes go in after the stage fix-ups (the game's shaders
+        # installed), then one Unity launch: import, the stage manifest, the DLC scene
+        playable = []
+        note = stage_unity.finish(project, info["stage"].lower(), bundles, missing, f"{scripts} game script(s) rebuilt; ",
+                                  method="AGDlcScene.BatchAll",
+                                  before_unity=lambda: playable.append(prepare_playable(project, info)))
         with open(os.path.join(base, "dlc.json"), "w", encoding="utf-8") as fh:
             json.dump({**info, "roots": rs}, fh, indent=1, ensure_ascii=False)
-        note += "; " + make_playable(project, info)
+        note += "; " + "".join(playable) + compile_errors(os.path.join(project, "_unity_batch.log"))
         print(f"  -> {project}  ({time.time() - t0:.0f}s)\n     {note}\n     {stage_unity.summarize(project)}", flush=True)
     shutil.rmtree(STAGING, ignore_errors=True)
     return 0
