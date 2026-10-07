@@ -2,7 +2,7 @@
 r"""Every stage GLB in reze-design, rebuilt from the game with the current tools.
 
     python ag.py glbs                      every stages/*.glb in reze-design
-    python ag.py glbs x348 x333            just those
+    python ag.py glbs x348 x333            just those (a first build when the row names a GLB not there yet)
     python ag.py glbs --jobs 3 --fresh     three Blender builds at once; re-extract every project
     python ag.py glbs --package-only       only lay out every stage's folder (below), no rebuild
 
@@ -111,6 +111,13 @@ def stage_glbs(codes: list[str]) -> list[dict]:
     if codes:
         want = {c.lower() for c in codes}
         out = [x for x in out if x["code"] in want or x["stage"] in want]
+        # a stage asked for by code whose row names a GLB not built yet: a first build
+        have = {x["target"] for x in out}
+        for r in rows:
+            stage = r["stage"].lower()
+            if (stage in want or LEVEL.get(stage, stage) in want) and full_name(r) not in have:
+                out.append({"code": LEVEL.get(stage, stage), "stage": stage, "path": None,
+                            "target": full_name(r), "row": r})
         missing = want - {x["code"] for x in out} - {x["stage"] for x in out}
         if missing:
             print(f"no GLB in {STAGES} for: {', '.join(sorted(missing))}")
@@ -201,8 +208,9 @@ def build(item: dict) -> bool:
     if not level:
         print(f"[glb] {code}: no {code}.unity in its project - skipped", flush=True)
         return False
-    os.makedirs(PREV, exist_ok=True)
-    shutil.copy2(item["path"], os.path.join(PREV, os.path.basename(item["path"])))
+    if item["path"]:   # None: a first build
+        os.makedirs(PREV, exist_ok=True)
+        shutil.copy2(item["path"], os.path.join(PREV, os.path.basename(item["path"])))
     # built in WORK (unity_to_glb puts its build folder next to --out), then
     # moved into its folder: stages/ holds only what is shared
     os.makedirs(WORK, exist_ok=True)
@@ -218,7 +226,7 @@ def build(item: dict) -> bool:
     print(f"[glb] {code}: {'ok' if rc == 0 else f'FAILED ({rc}), see {log}'}, {size:.1f} MB ({time.time() - t:.0f}s)", flush=True)
     if rc != 0:
         return False
-    if os.path.abspath(item["path"]) != os.path.abspath(flat) and os.path.isfile(item["path"]):
+    if item["path"] and os.path.abspath(item["path"]) != os.path.abspath(flat) and os.path.isfile(item["path"]):
         os.remove(item["path"])   # the old file, kept in _glb_prev
     item["path"] = flat
     package(item)
@@ -238,7 +246,8 @@ def main() -> int:
         return 1
     if a.package_only:
         for item in todo:
-            package(item)
+            if item["path"]:
+                package(item)
         return 0
     print(f"{len(todo)} stage(s): {', '.join(x['code'] for x in todo)}; logs in {LOGS}", flush=True)
 
