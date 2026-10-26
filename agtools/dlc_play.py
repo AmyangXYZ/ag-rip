@@ -86,6 +86,8 @@ def roots(info: dict, index: dict) -> list[str]:
 DLC_HELPERS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "unity", "dlc")
 # the character's render path, ported from P08.RenderPipeline / Battle.Simulator.Render (see its README)
 CHARFX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "unity", "charfx")
+# character-page reference renders + look export (agtools/charpage.py)
+CHARPAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "unity", "charpage")
 # game classes installed over their stubs: (source root, assembly folder)
 PORTS = ((DLC_HELPERS, "P08.Timeline"), (DLC_HELPERS, "P08.Main"),
          (CHARFX, "P08.RenderPipeline"), (CHARFX, "Battle.Simulator.Render"))
@@ -173,7 +175,7 @@ def install_ports(proj: str) -> list[str]:
             data["references"] = sorted((set(data.get("references", [])) - {"Cinemachine"}) | set(want))
             json.dump(data, open(path, "w", encoding="utf-8"), indent=2)
     # AGTools (runtime) and Editor helpers
-    for root in (DLC_HELPERS, CHARFX):
+    for root in (DLC_HELPERS, CHARFX, CHARPAGE):
         for sub, dst in (("AGTools", os.path.join(proj, "Assets", "AGTools")), ("Editor", os.path.join(proj, "Assets", "Editor"))):
             if not os.path.isdir(os.path.join(root, sub)):
                 continue
@@ -184,7 +186,7 @@ def install_ports(proj: str) -> list[str]:
 
 
 # the pipeline stand-in (stage_unity) and its character add-on (charfx/AGTools)
-PIPELINE_SOURCES = ("AGSimPipeline.cs", "AGSimShadows.cs", "AGSimPostFX.cs", "AGVolumes.cs", "AGSimCharacter.cs")
+PIPELINE_SOURCES = ("AGSimPipeline.cs", "AGSimShadows.cs", "AGSimPostFX.cs", "AGVolumes.cs", "AGSimCharacter.cs", "AGGroundShadow.cs")
 # Unity's own per-camera values, set as the camera renders: read back after it drew
 UNITY_CAMERA_GLOBALS = ("_Time", "_SinTime", "_CosTime", "unity_DeltaTime", "_ProjectionParams",
                         "_ScreenParams", "_ZBufferParams", "unity_OrthoParams", "_WorldSpaceCameraPos")
@@ -542,7 +544,7 @@ def dlc_spec(proj: str, info: dict) -> dict:
 
 
 def unity(proj: str, log: str, method: str | None = None) -> int:
-    cmd = [stage_unity.UNITY, "-batchmode", "-quit", "-projectPath", proj, "-logFile", log]
+    cmd = [stage_unity.UNITY, "-batchmode", "-nosound", "-quit", "-projectPath", proj, "-logFile", log]
     if method:
         cmd += ["-executeMethod", method]
     return subprocess.run(cmd, check=False).returncode

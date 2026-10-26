@@ -40,6 +40,7 @@ Commands
   python ag.py stage x343                stage -> Unity project  -> AG_stages/x343
   python ag.py glbs                      every reze-design stage GLB, rebuilt (extract + Blender, batched)
   python ag.py reze AG_dlc_play/<dlc>    recorded DLC -> reze-design scene zip per sequence
+  python ag.py charpage <skin>           character-page reference renders + look data (AG_charpage)
 
   python ag.py names                     build the ID -> name contact sheet
   python ag.py rename names.json --apply relabel the extracted tree
@@ -70,6 +71,7 @@ COMMANDS = {
     "stage": ("stage_unity.py", "one stage -> standalone Unity project (AG_stages)"),
     "glbs": ("stage_glbs.py", "rebuild every reze-design stage GLB from the game (extract + Blender, batched)"),
     "dlc": ("dlc_play.py", "one DLC skin -> Unity project playing its sequences (AG_dlc_play)"),
+    "charpage": ("charpage.py", "DLC skin project -> character-page reference renders + look data (AG_charpage)"),
     "reze": ("dlc_reze_scene.py", "one recorded DLC -> reze-design scene zips (stage, props, camera, audio)"),
     "voice": ("extract_voice.py", "voice / scene audio banks -> WAV (zh, ja if downloaded) + lip-sync data"),
     "vmd": ("to_vmd.py", "camera sequences -> VMD (motion + morphs, camera) via vendored reze-rig fbx2vmd"),

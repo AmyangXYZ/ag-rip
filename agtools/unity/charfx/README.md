@@ -16,6 +16,7 @@ Every constant comes from that code or from the prefab or scene data.
 | `P08.RenderPipeline/CharacterEffect.cs` | stub `Assets/Scripts/P08.RenderPipeline/CharacterEffect.cs` (keep its `.meta`/guid) | Keeps one `MaterialPropertyBlock` shared by all of the character's renderers (see below). Also sets `renderingLayerMask = 0x40000001` and turns the UI light (`UseUILightPosition`). | `CharacterEffect.Awake / OnEnable / OnDisable / LateUpdate / UpdateMaterials / UseUILightPosition`, `CharacterEffect.ShaderIds`, `CharacterEffectShaderIds`, `DitherEffect`, `InterferenceEffect`, `EnvironmentEffect`, `EnvironmentEffectUtil`, `EyeEffect` |
 | `Battle.Simulator.Render/CharacterRenderController.cs` | stub `Assets/Scripts/Battle.Simulator.Render/CharacterRenderController.cs` | Switches renderers on and off per category. It writes no shader state. | ILSpy, verbatim |
 | `AGTools/AGSimCharacter.cs` | new, goes next to `AGSimPipeline.cs` | Static `Camera.onPreCull` hook that sets the pipeline's character-only globals and draws the character passes (see below). | `LightingFeatures.SetupTowardMatrix / SetupShadows / GetWorldToShadow / SetupRenderFeature`, `DrawShadowPass.Execute`, `CharacterGlobalParams.Execute`, `CharacterFeature.Create / AddRenderPasses`, `OverrideEffectPass` + `OverriderEffectSystem.OverriderEffectRendering`, `CharacterSceneEnvironment` |
+| `AGTools/AGGroundShadow.cs` | new, goes next to `AGSimCharacter.cs` | Static `Camera.onPreCull` hook that draws the character ground shadow when `SceneSetting._groundShadowEnable` is set (see below). | `CharacterEffect.updateShadow`, `GroundShadowSystem.Regist / UnRegist / UpdateSettings / RenderIntoQuad / TransBounds / QuadIntoTarget / CubeToTarget / DrawBounds`, `GroundShadowPrePass` / `GroundShadowPass.Execute`, `NormalReconstruction.SetupProperties`, `RenderSettings.get_groundShadowDir` |
 
 `CharacterEffect.cs` writes these values into the shared property block:
 
@@ -40,20 +41,31 @@ Every constant comes from that code or from the prefab or scene data.
   3. `CharHairTransE`
   4. the eye `Override1`, `Override2` and `Override3` passes.
 
+`AGGroundShadow.cs` does the following on every camera except Preview and Reflection cameras:
+
+- Registers each active `CharacterEffect` with `_shadowEnabled` (its `_rendererList`, height `_shadowHeight`) and gives it a 128x128 R8 texture.
+- Before the camera renders (the game's event 250), draws each character's renderers with `Hidden/SimPipeline/Projection` into its texture through `sim_CharProjMatrix`, an oblique projection along the ground-shadow direction fitted to the character's bounds. It then blurs the texture with `Hidden/SimPipeline/CharacterShadowBlur` passes 0 and 1. Globals: `sim_CharProjMatrix`, `sim_CharProjFade`, `_InvDecalHeight`.
+- Adds a `BeforeForwardAlpha` command buffer (the game's event 402), placed after AGSimPipeline's opaque grab, that multiplies the shadow onto the ground:
+  - `_decalShadow` off: a quad with `Hidden/SimPipeline/CharacterShadow`.
+  - `_decalShadow` on: a sheared cube with `Hidden/SimPipeline/DecalShadow`. This reads `_CameraDepthTexture` and sets the globals `_NormalReconstructionMatrix`, `unity_MatrixInvVP` and `_ScaledScreenParams`.
+  - Both read a per-draw property block: `_MainTex`, `_Color`, `_EnableShadowScatter`, `_ShadowScatterColor`, `_ShadowScatterRange`, and for the decal also `_ShadowHeight`, `_ShadowDir`, `_NormalClipThreshold`.
+
+The decompiled `Projection.shader` and `CharacterShadowBlur.shader` say `ColorMask B`. The shader decompiler swaps R and B: in `SimPipeline/Hidden/ColorMask` the pass named `ColorMask_Red` reads `ColorMask B`. On the R8 texture these passes must write R, so they need `ColorMask R` or the shadow stays blank. `Hidden/SimPipeline/DecalShadow` is in `AG_pipeline/shaders` but not in the generated projects.
+
 ## Install (into a generated project, e.g. `AG_dlc_play/<skin>/unity/ExportedProject`)
 
 1. **CharacterEffect**: copy `P08.RenderPipeline/CharacterEffect.cs` over `Assets/Scripts/P08.RenderPipeline/CharacterEffect.cs`. Keep the existing `.meta`, which holds the stub's guid, so the prefab's serialized component stays bound.
 2. **CharacterRenderController**: copy `Battle.Simulator.Render/CharacterRenderController.cs` over the stub in `Assets/Scripts/Battle.Simulator.Render/` in the same way.
-3. **AGSimCharacter**: copy `AGTools/AGSimCharacter.cs` to `Assets/AGTools/`. It compiles into Assembly-CSharp, next to `AGSimPipeline.cs` and `AGVolumes.cs`.
+3. **AGSimCharacter** and **AGGroundShadow**: copy `AGTools/AGSimCharacter.cs` and `AGTools/AGGroundShadow.cs` to `Assets/AGTools/`. They compile into Assembly-CSharp, next to `AGSimPipeline.cs` and `AGVolumes.cs`.
 4. **Automated install**: `agtools/dlc_play.py` `install_ports` only walks `("P08.Timeline", "P08.Main")` under `agtools/unity/dlc`. Two changes are needed:
    - Add `"P08.RenderPipeline"` and `"Battle.Simulator.Render"` to that tuple, with `charfx` as a second source root, and copy `charfx/AGTools/*` along with the dlc `AGTools`.
    - Add `"AGSimCharacter.cs"` to `PIPELINE_SOURCES` (read from `charfx/AGTools`) so `AGDlcRecord` also records `sim_TowardMatrix` and the `sim_Character*` globals.
 
 The asmdefs need nothing extra. `CharacterEffect` and `CharacterRenderController` only use UnityEngine. `AGSimCharacter` uses `CharacterEffect` (the P08.RenderPipeline asmdef is auto-referenced by Assembly-CSharp) and `AGVolumes`. Neither needs Cinemachine or Timeline.
 
-All three files compile against the Unity 6000.6.1f1 reference DLLs with no warnings. They use `FindObjectsByType<T>()` without a sort mode and no `GetInstanceID`.
+All four files compile against the Unity 6000.6.1f1 reference DLLs with no warnings. They use `FindObjectsByType<T>()` without a sort mode and no `GetInstanceID`.
 
-`AGSimCharacter` hooks itself via `[RuntimeInitializeOnLoadMethod]` and `[InitializeOnLoadMethod]`. A batch capture that renders without entering Play mode should call `AGSimCharacter.Refresh()` after loading, next to `AGSimPipeline.Refresh()`.
+`AGSimCharacter` hooks itself via `[RuntimeInitializeOnLoadMethod]` and `[InitializeOnLoadMethod]`. A batch capture that renders without entering Play mode should call `AGSimCharacter.Refresh()` and `AGGroundShadow.Refresh()` after loading, next to `AGSimPipeline.Refresh()`. `AGGroundShadow` hooks itself the same way.
 
 ## Values for 107402 (`107402ui_custom` in X306a)
 
@@ -75,6 +87,5 @@ All three files compile against the Unity 6000.6.1f1 reference DLLs with no warn
 ## Not ported (inactive in the default home/DLC look)
 
 - **Effects:** CharacterEffectOverrider, fur, ghost, slice, image/SeperateRT, OutlineRT and selected outline.
-- **Ground shadow:** GroundShadowSystem, used only when `SceneSetting._groundShadowEnable` is set.
 - **CharacterPointLight\*:** it feeds `CHARACTER_ADDITIONAL_LIGHT`, which only the PBR character shaders compile.
 - **BokehDepthOfField character mask:** a post-processing effect.

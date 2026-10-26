@@ -121,6 +121,147 @@ def find_scenes(project: str) -> list[str]:
 SHADER_SRC = r"C:\AetherGazerStarter\AG_shaders"   # decompiled game shaders (USCSandbox)
 
 
+# AssetRipper writes some integer arrays (Mesh m_BoneNameHashes and
+# m_VariableBoneCountWeights, Avatar m_ID / m_HumanBoneIndex / ...) as hex with the high
+# nibble of a byte >= 0x80 taken from a signed byte: '0' + (-8..-1) = '(' .. '/' instead of
+# '8' .. 'f'. Unity 6 reads those characters as garbage: a mesh with more than 4 influences
+# per vertex (VariableBoneCountWeights) skins with wrong weights (109503: legs pulled to the
+# floor, torso in shards), bone name hashes and avatar ids are wrong.
+_BAD_HEX = re.compile(r"^(\s+\w+: )([0-9a-f()*+,\-./]{8,})$", re.M)
+_SIGNED_NIBBLE = str.maketrans("()*+,-./", "89abcdef")
+
+
+def fix_hex_arrays(project: str) -> int:
+    """Repair those hex strings in every .asset of the export. Returns assets changed."""
+    def sub(m: re.Match) -> str:
+        v = m.group(2)
+        if len(v) % 2 or not re.search(r"[()*+,\-./]", v) or re.fullmatch(r"-?\d+(\.\d+)?", v):
+            return m.group(0)
+        return m.group(1) + v.translate(_SIGNED_NIBBLE)
+
+    changed = 0
+    for dp, _, fns in os.walk(assets_dir(project)):
+        for fn in fns:
+            if not fn.endswith(".asset"):
+                continue
+            path = os.path.join(dp, fn)
+            text = open(path, encoding="utf-8", errors="surrogateescape").read()
+            if "(" not in text and "/" not in text and "." not in text:
+                continue
+            new = _BAD_HEX.sub(sub, text)
+            if new != text:
+                with open(path, "w", encoding="utf-8", errors="surrogateescape", newline="") as fh:
+                    fh.write(new)
+                changed += 1
+    return changed
+
+
+def fix_color_mask(text: str) -> str:
+    """The decompiler writes a one-channel ColorMask with red and blue swapped: the
+    pipeline's "ColorMask_Red" pass (SimPipeline/Hidden/ColorMask) reads `ColorMask B`,
+    and so do the R8 targets' passes (ground shadow Projection / CharacterShadowBlur,
+    CoC, the PBR AO masks), which then write nothing. Swap them back."""
+    return re.sub(r"(\bColorMask )([RGBA]+)\b",
+                  lambda m: m.group(1) + m.group(2).translate(str.maketrans("RB", "BR"))
+                  if m.group(2) not in ("RGB", "RGBA") else m.group(0), text)
+
+
+# a D3D11 pixel shader has 16 sampler registers. The game's compile shared samplers between
+# textures; the decompiled HLSL gives every texture its own (sampler2D / UNITY_DECLARE_SHADOWMAP),
+# so the PBR/Uber variants that read 17-18 textures (crystal, dissolve, hair trans + both shadow
+# maps) fail to compile ("maximum ps_4_0 sampler register index (16) exceeded") and draw magenta.
+_VARIANT = re.compile(r"^\s*#(?:if|elif) .*// \w*:DX11Pixel\w*\s*$")
+_SAMPLER_DECL = re.compile(r"^(sampler2D|samplerCUBE|sampler3D) (\w+);|^UNITY_DECLARE_SHADOWMAP\((\w+)\);")
+# textures given another texture's sampler when sharing the compare sampler is not enough:
+# effect masks, sampled with repeat wrap like the base map whose sampler they take
+_SHARE_FIRST = ("_DissolveTexture", "_HairNoiseTex2", "_HairNoiseTex", "_EffectMask")
+
+
+def _sample_calls(body: str, name: str, sampler: str) -> str:
+    """tex2D*(name, args) -> name.Sample*(sampler, ...), parentheses matched."""
+    out, i = [], 0
+    pat = re.compile(r"\btex2D(lod|bias|grad)?\(\s*" + re.escape(name) + r"\s*,")
+    while True:
+        m = pat.search(body, i)
+        if not m:
+            out.append(body[i:])
+            return "".join(out)
+        depth, j, args, start = 1, m.end(), [], m.end()
+        while depth:
+            c = body[j]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            elif c == "," and depth == 1:
+                args.append(body[start:j]); start = j + 1
+            j += 1
+        args.append(body[start:j - 1])
+        kind = m.group(1)
+        if kind == "lod":
+            call = f"{name}.SampleLevel({sampler}, ({args[0]}).xy, ({args[0]}).w)"
+        elif kind == "bias":
+            call = f"{name}.SampleBias({sampler}, ({args[0]}).xy, ({args[0]}).w)"
+        elif kind == "grad":
+            call = f"{name}.SampleGrad({sampler}, {args[0]}, {args[1]}, {args[2]})"
+        else:
+            call = f"{name}.Sample({sampler}, {args[0]})"
+        out.append(body[i:m.start()] + call)
+        i = j
+
+
+def fit_samplers(text: str) -> str:
+    """Per pixel variant reading more than 16 samplers: the shadow maps share one comparison
+    sampler (same state: linear, clamp, less-equal), then, while still over, a mask texture
+    takes the base map's sampler (its wrap/filter then follow _BaseMap's)."""
+    if "UNITY_DECLARE_SHADOWMAP" not in text and text.count("sampler2D ") < 17:
+        return text
+    lines = text.split("\n")
+    heads = [i for i, ln in enumerate(lines) if _VARIANT.match(ln)] + [len(lines)]
+    changed = False
+    # last variant first: a rewrite may add lines, which must not move the blocks still to do
+    for a, b in reversed(list(zip(heads, heads[1:]))):
+        frag = next((k for k in range(a, b) if " frag(" in lines[k]), None)
+        if frag is None:
+            continue
+        decls = [(i, _SAMPLER_DECL.match(lines[i].strip())) for i in range(a, frag)]
+        decls = [(i, m) for i, m in decls if m]
+        if len(decls) < 16:
+            continue
+        # the variant ends at the first #elif / #else / #endif after its frag at its own depth
+        indent = len(lines[a]) - len(lines[a].lstrip())
+        end = next((k for k in range(frag, b) if re.match(r"^\s*#(elif|else|endif)\b", lines[k])
+                    and len(lines[k]) - len(lines[k].lstrip()) == indent), b)
+        # Unity's own textures it samples (unity_SpecCube0) are declared by Unity, not here
+        builtin = set(re.findall(r"UNITY_SAMPLE_TEX\w*\(\s*(unity_\w+)", "\n".join(lines[frag:end])))
+        count = len(decls) + len(builtin)
+        if count <= 16:
+            continue
+        shadow = [(i, m.group(3)) for i, m in decls if m.group(3)]
+        for i, name in shadow[1:]:
+            if count <= 16:
+                break
+            lines[i] = lines[i].replace(f"UNITY_DECLARE_SHADOWMAP({name});",
+                                        f"Texture2D {name}; // shares {shadow[0][1]}'s comparison sampler\n"
+                                        f"#define sampler{name} sampler{shadow[0][1]}")
+            count -= 1
+        tex2d = {m.group(2): i for i, m in decls if m.group(1) == "sampler2D"}
+        if count > 16 and "_BaseMap" in tex2d:
+            body = "\n".join(lines[a:end])
+            donor = "_BaseMap"
+            body = body.replace(f"sampler2D {donor};", f"Texture2D {donor}; SamplerState sampler{donor};")
+            body = _sample_calls(body, donor, "sampler" + donor)
+            for name in [n for n in _SHARE_FIRST if n in tex2d] + [n for n in reversed(list(tex2d)) if n not in _SHARE_FIRST and n != donor]:
+                if count <= 16:
+                    break
+                body = body.replace(f"sampler2D {name};", f"Texture2D {name}; // shares {donor}'s sampler")
+                body = _sample_calls(body, name, "sampler" + donor)
+                count -= 1
+            lines[a:end] = body.split("\n")
+        changed = True
+    return "\n".join(lines) if changed else text
+
+
 def install_real_shaders(project: str, src: str = SHADER_SRC) -> tuple[int, list[str]]:
     """Replace AssetRipper's stub shaders with the decompiled game shaders.
 
@@ -145,7 +286,17 @@ def install_real_shaders(project: str, src: str = SHADER_SRC) -> tuple[int, list
                                  for root in (src, os.path.join(PIPELINE_REF, "shaders")))
                      if os.path.isfile(c)), "")
         if real:
-            shutil.copyfile(real, path)
+            # THE LIGHT LOOPS ARE `while (true)`, as decompiled, and the HLSL
+            # compiler tries to unroll every loop it can: 43-56 iterations into
+            # PBR/Uber's Forward+ walk it gives up ("unable to unroll loop") and
+            # the character draws magenta. [loop] keeps them loops, as the game's
+            # own compile did.
+            text = open(real, encoding="utf-8-sig", errors="replace").read()
+            text = re.sub(r"(?<!\[loop\] )\bwhile \(true\)", "[loop] while (true)", text)
+            text = fix_color_mask(text)
+            text = fit_samplers(text)
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(text)
             installed += 1
         elif not m.group(1).startswith("Hidden/AG/"):      # our own helper shaders
             missing.append(m.group(1))
@@ -286,7 +437,7 @@ def unity_batch(project: str, prefab_scenes: list[tuple[str, str]], method: str 
     if not os.path.isfile(UNITY):
         return "Unity not found - open the project and run AGManifest.Batch to write the manifest"
     log = os.path.join(project, "_unity_batch.log")
-    subprocess.run([UNITY, "-batchmode", "-quit", "-projectPath", proj,
+    subprocess.run([UNITY, "-batchmode", "-nosound", "-quit", "-projectPath", proj,
                     "-executeMethod", method, "-logFile", log], check=False)
     man = os.path.join(proj, "ag_render_manifest.json")
     if not os.path.isfile(man):
@@ -417,6 +568,9 @@ def finish(project: str, code: str, bundles: list[str], missing: set[str], note:
     note += (f"{mats} decompiled shader(s) installed"
              + (f"; no source for {len(unmatched)}: {unmatched[:6]}" if unmatched else ""))
     match_asset_names(project)
+    hexfix = fix_hex_arrays(project)
+    if hexfix:
+        note += f"; {hexfix} asset(s) with signed-nibble hex arrays repaired"
     activated = activate_roots(project)
     unmaterialed = disable_unmaterialed(project)
     set_linear_color_space(project)

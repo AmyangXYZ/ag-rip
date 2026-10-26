@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 r"""Camera sequences -> MMD VMD (motion + morphs, camera) with reze-rig's fbx2vmd.
 
-    python ag.py vmd 109501 --target-pmx D:\reze-rig\public\models\托特\托特.pmx
+    python ag.py vmd 109501 --target-pmx D:\reze-engine\web\public\models\reze\reze.pmx
     python ag.py vmd 109501 --only touch1,debut --target-pmx <model.pmx>
+
+THE TARGET IS THE MODEL THAT PLAYS IT. The VMD is made for one model: the body is
+retargeted onto its skeleton, and each facial / lip channel is written under the name of
+the morph that model has for it (reze-rig's MORPH_MAP). Played on another model, every
+name that model lacks does nothing. The scenes play on reze (reze-design's cast, the
+engine's models/reze/reze.pmx), so that is the target. Made for 托特 instead, the lip
+channels land on 托特's own names - Mouth_a -> え1, Mouth_u -> お1, Mouth_e -> ワ1 -
+which reze does not have: on reze only お (Mouth_o) moved, and the mouth sat still
+through most of every line. Made for reze they are あ / う / え / お.
 
 For each <skin>@<seq> in AG_fbx_anim/<cid>/cameras/ (written by `ag.py cams`; a sequence
 whose timeline camera is disabled - it stays on the home camera - has no .camera.*), one

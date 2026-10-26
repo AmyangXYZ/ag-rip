@@ -938,40 +938,86 @@ def export_characters(cid: str, job: dict, merged_dir: str, outputs: list[tuple[
 
 
 # ------------------------------------------------------------------ facial, lips, audio
-def voice_cue(skin: str, data: dict, lang: str | None) -> tuple[str, str, float] | None:
-    """The sequence's voice line: (sheet, cue, start s). The timeline's own voice cue when it
-    has one (debut: greet); otherwise the line the game starts with it, paired by name -
-    touchN -> talkN, debut[N] -> greet[N], interact_* / wedding_touch_10N -> <same>_01 when
-    that is the only variant (lengths match the sequences)."""
+_decoded: dict[tuple, dict] = {}
+
+
+def voice_wavs(sheet: str, lang: str | None) -> dict[str, str]:
+    """extract_voice.decode, once per bank and run (it re-runs vgmstream on every call)."""
+    if (sheet, lang) not in _decoded:
+        sys.path.insert(0, HERE)
+        import extract_voice
+        _decoded[sheet, lang] = extract_voice.decode(sheet, lang)
+    return _decoded[sheet, lang]
+
+
+def lip_data(sheet: str, lang: str, cue: str) -> dict | None:
+    """A cue's lip data. The lip tables carry a few names with a stray character the audio
+    bank does not (128402: lips "v_s_128402_wedding_touch_102._01" for the audio cue
+    "..._102_01", same 361 frames / 12.0 s): an exact name first, else the one name equal
+    once punctuation is dropped."""
+    sys.path.insert(0, HERE)
+    import extract_voice
+    table = extract_voice.lips(sheet, lang)
+    if cue in table:
+        return table[cue]
+    norm = lambda s: re.sub(r"[^\w]", "", s)
+    hits = [v for k, v in table.items() if norm(k) == norm(cue)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def voice_cue(skin: str, data: dict, lang: str | None) -> list[tuple[str, str, float]]:
+    """The sequence's voice lines: [(sheet, cue, start s)], empty if none. The timeline's own
+    voice cue when it has one (debut: greet); otherwise the line the game starts with it,
+    paired by name - touchN -> talkN, debut[N] -> greet[N] - and for interact_* /
+    wedding_touch_* every line <seq>_01, _02 ... back to back.
+
+    Several lines are one chain in the game: the wedding scene's graph (oath/data/<skin>/
+    oathcharacterdata, OathCharacterData) runs an Independent node -> Talk _01 -> Talk _02
+    ... -> AndLogic with the sequence's Animation node, each Talk starting when the previous
+    voice ends, in number order (128402 wedding_touch_101: _01, _02; _104: _01.._05; 104903
+    _101: _01.._03; 109503 _105: _01.._04). The lip tables' whole-sequence entries
+    (v_s_128402_wedding_touch_104, 51.5 s) are exactly those lines' lip data laid end to end
+    (each line found within 0-3 frames of the previous one's end), and the summed line
+    lengths match the sequences (101: 20.3 s of voice, 20.2 s sequence)."""
     for a in data.get("audio_cues", []):
         if a["voice"] and a["sheet"].startswith("vo_"):
-            return a["sheet"], a["cue"], a["start"]
+            return [(a["sheet"], a["cue"], a["start"])]
     sys.path.insert(0, HERE)
     import extract_voice
     sheet = f"vo_sys_{skin}"
-    known = set(extract_voice.lips(sheet, lang or "zh"))
+    lang = lang or "zh"
+    known = set(extract_voice.lips(sheet, lang))
     seq = data["sequence"]
     # the game's own pairing (game_config.voices: its interaction configs), first take
     import game_config
     cue = next((c for c in game_config.voices(skin).get(seq, []) if c in known), None)
     if cue:
-        return sheet, cue, 0.0
+        return [(sheet, cue, 0.0)]
     m = re.fullmatch(r"touch(\d+)", seq)
     names = [f"talk{m.group(1)}"] if m else []
     m = re.fullmatch(r"debut(\d*)", seq)
     if m:
         names = [f"greet{m.group(1)}", "greet"] if m.group(1) else ["greet", "greet1"]
-    if seq.startswith(("interact_", "wedding_touch_")):
-        variants = sorted(k for k in known if k.startswith(f"v_s_{skin}_{seq}_"))
-        plain = f"v_s_{skin}_{seq}_01"
-        if plain in variants and all(v.startswith(plain) for v in variants):
-            variants = [plain]                # _01 beside alternate takes of it (_01_管理员)
-        # several different lines (wedding_touch_105: _01.._04) are placed by game code: no guess
-        names = [variants[0][len(f"v_s_{skin}_"):]] if len(variants) == 1 else []
     for n in names:
         if f"v_s_{skin}_{n}" in known:
-            return sheet, f"v_s_{skin}_{n}", 0.0
-    return None
+            return [(sheet, f"v_s_{skin}_{n}", 0.0)]
+    if not seq.startswith(("interact_", "wedding_touch_")):
+        return []
+    # the numbered lines the bank plays (_01, _02 ...; not alternate takes "_01_管理员", nor
+    # the lip-only whole-sequence entry), each starting where the previous one's audio ends
+    wavs = voice_wavs(sheet, lang)
+    lines = sorted(c for c in wavs if re.fullmatch(rf"v_s_{skin}_{re.escape(seq)}_\d+", c))
+    out, t = [], 0.0
+    for c in lines:
+        out.append((sheet, c, t))
+        t += wav_seconds(wavs[c])
+    return out
+
+
+def wav_seconds(path: str) -> float:
+    import wave
+    with wave.open(path) as w:
+        return w.getnframes() / w.getframerate()
 LIP_SHAPES = ("Mouth_a", "Mouth_i", "Mouth_u", "Mouth_e", "Mouth_o")   # CriLipsExPlayer A I U E O (I unused)
 
 
@@ -1071,10 +1117,9 @@ def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
                     if w >= 1:
                         break
                     vals[i] = weight(pf, pclip, key, i / FPS) * (1 - w)
-    vc = voice_cue(skin, data, lang) if lang else None
-    lip = extract_voice.lips(vc[0], lang).get(vc[1]) if vc else None
-    lip_start = vc[2] if vc else 0.0
-    if lip:
+    lines = [(c, start, lip_data(sh, lang, c)) for sh, c, start in voice_cue(skin, data, lang)] if lang else []
+    lines = [ln for ln in lines if ln[2]]
+    if lines:
         # CriLipsExPlayer.LateUpdate sets weight = raw/10 on the mouth's A/I/U/E/O channels -
         # but I is -1 (the constructor default, and the field is not serialized), so the game
         # never applies the "i" vowel: only a/u/e/o. The data is 30 fps (length_ms / frames
@@ -1084,18 +1129,20 @@ def build_morphs(skin: str, data: dict, lang: str | None, path: str) -> int:
         # it: phrase by phrase the mouth opens 30-60 ms after the sound and shuts 50-100 ms
         # after it (the analysis window's latency; the game's /33 drift half-hides it). The
         # lips lead by LIP_LEAD so the mouth moves with the sound, not after it.
+        # Several lines (a chain of Talk nodes) each drive the mouth from their own start.
         mouth = zlib.crc32(b"Mouth")
-        aiueo = lip["aiueo"]
-        for k, shape in enumerate(LIP_SHAPES):
-            if k == 1:
-                continue
-            vals = chans.setdefault((mouth, zlib.crc32(shape.encode())), [0.0] * n)
-            for i in range(n):
-                ms = (i / FPS - lip_start) * 1000 + LIP_LEAD
-                j = int(ms * lip["fps"] / 1000 + 1e-6)
-                if ms >= 0 and j < len(aiueo):
-                    vals[i] = aiueo[j][k]
-    spec = {"fps": FPS, "frames": n, "lips": f"{vc[1]} @{lip_start:g}s ({lang})" if lip else None,
+        for _, lip_start, lip in lines:
+            aiueo = lip["aiueo"]
+            for k, shape in enumerate(LIP_SHAPES):
+                if k == 1:
+                    continue
+                vals = chans.setdefault((mouth, zlib.crc32(shape.encode())), [0.0] * n)
+                for i in range(n):
+                    ms = (i / FPS - lip_start) * 1000 + LIP_LEAD
+                    j = int(ms * lip["fps"] / 1000 + 1e-6)
+                    if ms >= 0 and j < len(aiueo):
+                        vals[i] = aiueo[j][k]
+    spec = {"fps": FPS, "frames": n, "lips": " + ".join(f"{c} @{t:g}s" for c, t, _ in lines) + f" ({lang})" if lines else None,
             "note": "mesh / shape are CRC32 of the SkinnedMeshRenderer path and the blend-shape "
                     "channel name (e.g. CRC32('Mouth'), CRC32('Mouth_a')); values 0..1",
             "channels": [{"mesh": m, "shape": s, "values": [round(v, 4) for v in vals]}
@@ -1162,12 +1209,11 @@ def export_audio(skin: str, data: dict, out_dir: str, stem: str, lang: str) -> s
         if w:
             parts.append((w, 0.0))
             labels.append(os.path.basename(w)[:-4])
-    vc = voice_cue(skin, data, lang)
-    if vc:
-        w = extract_voice.decode(vc[0], lang).get(vc[1])
+    for sheet, cue, start in voice_cue(skin, data, lang):
+        w = voice_wavs(sheet, lang).get(cue)
         if w:
-            parts.append((w, vc[2]))
-            labels.append(f"{vc[1]} [{lang}]")
+            parts.append((w, start))
+            labels.append(f"{cue} @{start:g}s [{lang}]")
     if not parts:
         return None
     out = os.path.join(out_dir, f"{stem}.wav")
@@ -1341,10 +1387,13 @@ def main() -> int:
             proj = Project(project)
             job = clip_set_job(cid, skin, kind)
             langs = args.lang.split(",")
-            if kind == "dlc" and job:                    # the interactions play on the home-screen model
+            if kind == "dlc":                            # the interactions play on the home-screen model
                 ui_fbx, ui_prefab = ui_rig(skin, cid)
                 if ui_fbx and ui_prefab:
-                    job = dict(job, model=ui_fbx, prefab=ui_prefab, stem=f"{skin}ui_tpose")
+                    # some skins ship no <skin>dlc clip set (119401: the clips sit in the
+                    # timeline bundle itself); the merged clips are all the job needs
+                    job = dict(job or {"folder": f"{skin}dlc", "dir": "", "clips": [], "prefix": ""},
+                               model=ui_fbx, prefab=ui_prefab, stem=f"{skin}ui_tpose")
             prefabs = sorted(p for p in glob.glob(os.path.join(proj.assets, "**", "*.prefab"), recursive=True)
                              if "\n--- !u!320 " in _read(p))
             merged_dir = os.path.join(CACHE, "_merged", f"{skin}_{kind}")
