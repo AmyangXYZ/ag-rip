@@ -712,7 +712,7 @@ def _path_is(p: str, name: str) -> bool:
     """A clip path, plain or CRC-hashed ("path_0x1234ABCD_..."), naming `name`."""
     if p == name:
         return True
-    m = re.match(r"path_0x([0-9A-Fa-f]{8})", p)
+    m = re.match(r"path_0x([0-9A-Fa-f]{1,8})_", p)
     return bool(m) and int(m.group(1), 16) == zlib.crc32(name.encode("utf-8")) & 0xFFFFFFFF
 
 
@@ -1268,31 +1268,43 @@ def run_in_blender(payload: str) -> None:
             by_name.setdefault(node.name, node)
     U, B = [], []
     # the body skeleton only: prop rigs travel with the model on their own terms (108901ui's
-    # weapon Bone_Box00-04 sit 1.5 m off the prefab and stretched the fit 0.016 / 0.010 / 0.006)
+    # weapon Bone_Box00-04 sit 1.5 m off the prefab and stretched the fit 0.016 / 0.010 / 0.006),
+    # and the Biped's own prop slots are props too (124801ui's Bip001 Prop1, 2 m off)
     body = any(b.name.startswith("Bip001") for b in arm.data.bones)
     for bone in arm.data.bones:
         node = by_name.get(bone.name)
-        if node is not None and (not body or bone.name.startswith("Bip001")):
+        if node is not None and (not body or bone.name.startswith("Bip001")
+                                 and not bone.name.startswith("Bip001 Prop")):
             U.append(uworld(node)[:3, 3])
             B.append(np.array(arm.matrix_world @ bone.head_local))
     U, B = np.array(U), np.array(B)
-    X = np.hstack([U, np.ones((len(U), 1))])
-    sol, *_ = np.linalg.lstsq(X, B, rcond=None)
+
+    def similarity(U, B):
+        """B ~ s R U + t, R orthogonal (Unity -> Blender mirrors, so det -1 is kept): the
+        map is rigid plus unit scale, and a free affine fit would bend into skew to
+        absorb an outlier (1248's Bip001 Prop1, 2 m off in the prefab, skewed every
+        camera to singular values 0.023 / 0.010 / 0.004 and filmed her side-on)."""
+        mu, mb = U.mean(0), B.mean(0)
+        u, sv_, vt = np.linalg.svd((B - mb).T @ (U - mu))
+        R = u @ vt
+        s = sv_.sum() / ((U - mu) ** 2).sum()
+        return s * R, mb - s * R @ mu
+
+    A, t = similarity(U, B)
     # a bone the model FBX carries elsewhere than the prefab (108901ui: residual 1.4e-2 against
-    # 1e-8 on every other rig) bends the whole fit, and with it every camera: drop such bones
+    # 1e-8 on every other rig) pulls the whole fit, and with it every camera: drop such bones
     # and fit again on the ones that agree
     for _ in range(3):
-        err = np.linalg.norm(X @ sol - B, axis=1)
+        err = np.linalg.norm(U @ A.T + t - B, axis=1)
         keep = err <= max(1e-6, 20 * np.median(err))
         if keep.all():
             break
         print(f"CAMS fit: {int((~keep).sum())} bone(s) off the prefab dropped")
-        X, B = X[keep], B[keep]
-        sol, *_ = np.linalg.lstsq(X, B, rcond=None)
-    A, t = sol[:3].T, sol[3]
+        U, B = U[keep], B[keep]
+        A, t = similarity(U, B)
     sv = np.linalg.svd(A, compute_uv=False)
     print(f"CAMS fit on {os.path.basename(job['model'])}: {len(U)} bones, "
-          f"max residual {np.abs(X @ sol - B).max():.1e}, scale {sv.mean():.5f}")
+          f"max residual {np.abs(U @ A.T + t - B).max():.1e}, scale {sv.mean():.5f}")
     scene = bpy.context.scene
 
     for seq in job["sequences"]:
